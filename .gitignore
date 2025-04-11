@@ -1,0 +1,10 @@
+FSM24.dll
+FSM24.ini
+FSMTypes.ini
+GAS.dll
+GAS.ini
+/build
+/dist
+/Reports
+/.idea
+/__pycache__
