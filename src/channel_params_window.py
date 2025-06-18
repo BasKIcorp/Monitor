@@ -10,7 +10,7 @@ class ChannelParamsWindow(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.setFixedSize(800, 600)  # Уменьшаем размер окна, т.к. убрали раздел
+        self.setFixedSize(600, 600)  # Уменьшаем размер окна, т.к. убрали раздел
         self.setWindowTitle("Параметры переключения каналов")
         self.setModal(True)
         self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
@@ -50,8 +50,10 @@ class ChannelParamsWindow(QDialog):
             channels_layout.addWidget(channel_label, i+1, 0)
             row.append(channel_label)
             
-            # Имя канала (неизменяемое)
-            channel_name = QLabel(f"АТ-{i+1}")
+            # Имя канала (изменяемое)
+            channel_name = QLineEdit()
+            channel_name.setText(self.config.get(f"channel_{i+1}", {}).get("name", f"АТ-{i+1}"))
+            channel_name.setFixedWidth(150)
             channel_name.setAlignment(QtCore.Qt.AlignCenter)
             channels_layout.addWidget(channel_name, i+1, 1)
             row.append(channel_name)
@@ -167,7 +169,8 @@ class ChannelParamsWindow(QDialog):
         # Настройки по умолчанию для каждого канала
         for i in range(1, 13):  # 12 каналов
             config[f"channel_{i}"] = {
-                "active": i == 1  # По умолчанию активен только первый канал
+                "active": i == 1,  # По умолчанию активен только первый канал
+                "name": f"АТ-{i}"  # Имя канала по умолчанию
             }
         
         # Пытаемся загрузить существующие настройки
@@ -199,6 +202,7 @@ class ChannelParamsWindow(QDialog):
         for i, widgets in enumerate(self.channel_widgets):
             channel_num = i + 1
             self.config[f"channel_{channel_num}"]["active"] = widgets[3].isChecked()  # Проверяем состояние радиокнопки "Вкл"
+            self.config[f"channel_{channel_num}"]["name"] = widgets[1].text()  # Обновляем имя канала
         
         # Сохраняем в файл
         try:
@@ -208,13 +212,7 @@ class ChannelParamsWindow(QDialog):
                 
             with open('config/channel_config.json', 'w', encoding="utf-8") as file:
                 json.dump(self.config, file, indent=4)
-            
-            QtWidgets.QMessageBox.information(
-                self, 
-                "Успех", 
-                "Настройки каналов успешно сохранены",
-                QtWidgets.QMessageBox.Ok
-            )
+
             self.close()
         except Exception as e:
             QtWidgets.QMessageBox.critical(

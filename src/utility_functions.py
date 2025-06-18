@@ -12,6 +12,8 @@ from datetime import datetime
 import numpy as np
 import json
 import time
+import subprocess
+import math
 
 # Глобальные переменные
 first_start = True
@@ -67,6 +69,8 @@ STATUS_BITS = {
 dll_path = "resources/drivers/GAS.dll"
 my_dll = ctypes.WinDLL(dll_path)
 
+# Путь к exequant.exe
+exequant_path = ""
 
 class ChannelSwitcher:
     def __init__(self):
@@ -467,7 +471,8 @@ def load_channel_config():
     # Настройки по умолчанию для каждого канала
     for i in range(1, 13):  # 12 каналов
         config[f"channel_{i}"] = {
-            "active": i == 1  # По умолчанию активен только первый канал
+            "active": i == 1,  # По умолчанию активен только первый канал
+            "name": f"АТ-{i}"  # Имя канала по умолчанию
         }
     
     # Пытаемся загрузить существующие настройки
@@ -487,9 +492,18 @@ def load_channel_config():
     return config
 
 
-def read_fon_spe():
+def get_channel_name(channel_num):
+    """Получает имя канала из конфигурации"""
+    if channel_num < 0 or channel_num > 12:
+        return f"Канал {channel_num}"
+        
+    config = load_channel_config()
+    return config.get(f"channel_{channel_num}", {}).get("name", f"АТ-{channel_num}")
+
+
+def read_fon_spe(spe_file="Spectra/fon.spe"):
     binary_data = b""
-    with open('Spectra/fon.spe', 'rb') as file:
+    with open(spe_file, 'rb') as file:
         data = file.readlines()
         for line in data[36:-1]:
             binary_data += line
@@ -619,3 +633,106 @@ def initialize_device():
     except Exception as e:
         logging.error(f"Ошибка при запуске инициализации: {e}")
         return False 
+
+
+def spe_to_spectrum_string(spe_file="Spectra/fon.spe"):
+    """
+    Преобразует данные из SPE файла в строку формата "x1,y1;x2,y2;..."
+    для передачи в exequant.exe
+    """
+    try:
+        # Проверяем существование файла
+        if not os.path.exists(spe_file):
+            logging.error(f"Файл спектра не найден: {spe_file}")
+            return ""
+            
+        # Читаем данные из SPE файла
+        x, y, _ = read_fon_spe(spe_file)
+        
+        # Проверяем, что данные не пустые
+        if not x or not y or len(x) != len(y):
+            logging.error(f"Некорректные данные спектра из файла {spe_file}: x={len(x)}, y={len(y)}")
+            return ""
+        
+        # Создаем строку формата "x1,y1;x2,y2;..."
+        spectrum_points = []
+        for i in range(len(x)):
+            # Проверяем, что значения не являются NaN или бесконечностью
+            if math.isnan(x[i]) or math.isnan(y[i]) or math.isinf(x[i]) or math.isinf(y[i]):
+                continue
+            spectrum_points.append(f"{x[i]},{y[i]}")
+        
+        # Проверяем, что у нас есть точки для спектра
+        if not spectrum_points:
+            logging.error(f"Нет валидных точек спектра в файле {spe_file}")
+            return ""
+            
+        # Ограничиваем количество точек, если их слишком много
+        if len(spectrum_points) > 1000:
+            logging.warning(f"Слишком много точек спектра ({len(spectrum_points)}), ограничиваем до 1000")
+            # Выбираем равномерно распределенные точки
+            step = len(spectrum_points) // 1000
+            spectrum_points = spectrum_points[::step][:1000]
+        
+        result = ";".join(spectrum_points)
+        logging.info(f"Спектр успешно преобразован в строку ({len(spectrum_points)} точек)")
+        return result
+    except Exception as e:
+        logging.error(f"Ошибка преобразования SPE в строку спектра: {e}")
+        return ""
+
+def run_exequant(spectrum_string, model="1.mmq"):
+    """
+    Запускает exequant.exe с указанным спектром и моделью
+    Возвращает значение параметра T из JSON ответа
+    """
+    if not exequant_path:
+        logging.warning("Путь к exequant.exe не указан")
+        return None
+        
+    if not os.path.exists(exequant_path):
+        logging.error(f"Файл exequant.exe не найден по указанному пути: {exequant_path}")
+        return None
+        
+    try:
+        # Формируем команду
+        cmd = f'"{exequant_path}" --model {model} --only_print --spectrum "{spectrum_string}"'
+        
+        # Запускаем процесс
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+        
+        # Проверяем код возврата
+        if result.returncode != 0:
+            logging.error(f"Ошибка выполнения exequant.exe, код возврата: {result.returncode}")
+            logging.error(f"Сообщение об ошибке: {result.stderr}")
+            return None
+        
+        # Проверяем наличие вывода
+        if not result.stdout:
+            logging.error("Пустой вывод от exequant.exe")
+            return None
+            
+        try:
+            # Парсим JSON из вывода
+            result_json = json.loads(result.stdout)
+            
+            # Проверяем структуру JSON
+            if "spectrum" not in result_json or "Т" not in result_json["spectrum"] or "value" not in result_json["spectrum"]["Т"]:
+                logging.error(f"Неверная структура JSON от exequant.exe: {result.stdout}")
+                return None
+            
+            # Извлекаем значение параметра T
+            t_value = result_json["spectrum"]["Т"]["value"]
+            
+            logging.info(f"Exequant успешно выполнен, значение T: {t_value}")
+            return t_value
+        except json.JSONDecodeError as e:
+            logging.error(f"Ошибка при разборе JSON от exequant.exe: {e}")
+            logging.error(f"Полученный вывод: {result.stdout}")
+            return None
+    except subprocess.TimeoutExpired:
+        logging.error("Превышено время ожидания выполнения exequant.exe (10 секунд)")
+        return None
+    except Exception as e:
+        logging.error(f"Ошибка при запуске exequant.exe: {e}")
+        return None 

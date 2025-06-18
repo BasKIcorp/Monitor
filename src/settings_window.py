@@ -19,6 +19,11 @@ class SettingsWindow(QDialog):
         utility_functions.fspec_path, _ = dlg.getOpenFileName(self, 'Открыть файл', './', "Файл программы FSpec (*.exe)")
         self.path2_label.setText(utility_functions.fspec_path)
 
+    def choose_exequant(self):
+        dlg = QFileDialog()
+        utility_functions.exequant_path, _ = dlg.getOpenFileName(self, 'Открыть файл', './', "Файл программы Exequant (*.exe)")
+        self.exequant_path_label.setText(utility_functions.exequant_path)
+
     def save(self):
         self.close()
 
@@ -27,9 +32,9 @@ class SettingsWindow(QDialog):
         else:
             utility_functions.simulation = 1
         config = configparser.ConfigParser()
-        config.read("config/Device.ini")
+        config.read("./Device.ini")
         config.set('FSM', 'simulation', str(utility_functions.simulation))
-        with open('config/Device.ini', 'w') as configfile:
+        with open('./Device.ini', 'w') as configfile:
             config.write(configfile)
 
         utility_functions.plots_interval = int(self.combo1.currentText()[0:2])
@@ -59,6 +64,7 @@ class SettingsWindow(QDialog):
         json_data["simulation"] = str(utility_functions.simulation)
         json_data["method_path"] = utility_functions.method_path
         json_data["fspec_path"] = utility_functions.fspec_path
+        json_data["exequant_path"] = utility_functions.exequant_path
         json_data["params_period"] = self.combo2.currentText()
         json_data["plots_period"] = self.combo1.currentText()
         json_data["days_threshold"] = utility_functions.days_threshold
@@ -81,6 +87,15 @@ class SettingsWindow(QDialog):
         utility_functions.method_path = json_data["method_path"]
         self.path2_label.setText(json_data["fspec_path"])
         utility_functions.fspec_path = json_data["fspec_path"]
+        
+        # Загрузка пути к exequant.exe
+        if "exequant_path" in json_data:
+            self.exequant_path_label.setText(json_data["exequant_path"])
+            utility_functions.exequant_path = json_data["exequant_path"]
+        else:
+            self.exequant_path_label.setText("")
+            utility_functions.exequant_path = ""
+        
         self.combo1.setCurrentText(json_data["plots_period"])
         utility_functions.plots_interval = int(json_data["plots_period"][0:2])
         self.combo2.setCurrentText(json_data["params_period"])
@@ -174,6 +189,21 @@ class SettingsWindow(QDialog):
         path2_layout.addWidget(self.path2_label)
         layout.addLayout(path2_layout)
 
+        # Добавляем выбор пути к exequant.exe
+        label_exequant = QtWidgets.QLabel()
+        label_exequant.setText("Путь к файлу Exequant")
+        layout.addWidget(label_exequant)
+        
+        exequant_path_layout = QHBoxLayout()
+        exequant_button = QtWidgets.QPushButton()
+        exequant_button.setText("Выбрать")
+        exequant_button.clicked.connect(self.choose_exequant)
+        self.exequant_path_label = QtWidgets.QLabel()
+        self.exequant_path_label.setText(utility_functions.exequant_path)
+        exequant_path_layout.addWidget(exequant_button)
+        exequant_path_layout.addWidget(self.exequant_path_label)
+        layout.addLayout(exequant_path_layout)
+
         label4 = QtWidgets.QLabel()
         label4.setText("Период обновления графиков")
         layout.addWidget(label4)
@@ -213,12 +243,6 @@ class SettingsWindow(QDialog):
         self.save_entry.setValidator(QtGui.QIntValidator())
         layout.addWidget(self.save_entry)
 
-        # Добавляем виджет "Взять спектр пустой кюветы"
-        # self.fon_update_settings = QtWidgets.QPushButton()
-        # self.fon_update_settings.setText("Взять спектр пустой кюветы")
-        # self.fon_update_settings.clicked.connect(self.parent.run_fix_fon_thread)
-        # layout.addWidget(self.fon_update_settings)
-        
         # Добавляем информацию о последнем обновлении фона
         fon_date_layout = QHBoxLayout()
         fon_date_label = QtWidgets.QLabel("Дата обновления фона:")

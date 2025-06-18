@@ -9,3 +9,4 @@ main.spec
 main.exe
 main1.exe
 src/gui_old.py
+src/__pycache__

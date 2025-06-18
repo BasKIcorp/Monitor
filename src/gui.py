@@ -43,10 +43,29 @@ zoom = True
 
 master = None
 
+# Специальный класс QLabel с возможностью автоматического обрезания текста
+class ElidedLabel(QtWidgets.QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.elide_mode = QtCore.Qt.ElideRight
+        self.content = text
+        
+    def setText(self, text):
+        self.content = text
+        super().setText(text)
+        self.update()
+        
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        metrics = QtGui.QFontMetrics(self.font())
+        elided = metrics.elidedText(self.content, self.elide_mode, self.width())
+        painter.drawText(self.rect(), self.alignment(), elided)
+
 
 class Ui_MainWindow(object):
     def __init__(self):
         self.stop_event = threading.Event()
+        self._in_error_out = False
 
     def change_color(self):
         self.parent.setStyleSheet('background-color: red;')
@@ -91,11 +110,13 @@ class Ui_MainWindow(object):
                         logging.warning(f"Невозможно определить дату файла: {filename}")
 
     def run_thread(self):
+        # Проверяем, не запущен ли уже поток измерения
+        if hasattr(self, 'thread') and self.thread is not None and self.thread.is_alive():
+            logging.warning("Попытка запустить поток, когда он уже запущен. Игнорируем.")
+            return
+            
         utility_functions.stop_threads = False
         self.stop_event.clear()  # Сбрасываем событие остановки
-        if self.thread is not None and self.thread.is_alive():
-            self.stop_event.set()  # Сигнализируем старому потоку завершиться
-            self.thread.join()  # Ждём завершения старого потока
         
         # Проверяем режим симуляции
         if utility_functions.simulation == "1":
@@ -126,6 +147,12 @@ class Ui_MainWindow(object):
         if hasattr(self, 'thread') and self.thread is not None:
             self.thread.start()
             self.start_button.setText("Остановить\nизмерение")
+            # Отключаем старый обработчик перед подключением нового
+            try:
+                self.start_button.clicked.disconnect()
+            except TypeError:
+                # Игнорируем ошибку, если нет подключенных обработчиков
+                pass
             self.start_button.clicked.connect(self.stop_thread)
             # Обновляем доступность кнопки взятия спектра пустой кюветы в окне настроек, если оно открыто
             if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
@@ -137,17 +164,29 @@ class Ui_MainWindow(object):
         utility_functions.stop_threads = True
         self.stop_event.set()  # Устанавливаем событие остановки
         if self.thread is not None and self.thread.is_alive():
-            self.thread.join(timeout=2)  # Ожидаем завершения с таймаутом
-            if self.thread.is_alive():
-                print("Поток не завершился вовремя, принудительное завершение невозможно (daemon)")
+            # Проверяем, не пытаемся ли мы присоединиться к текущему потоку
+            if self.thread != threading.current_thread():
+                self.thread.join(timeout=2)  # Ожидаем завершения с таймаутом
+                if self.thread.is_alive():
+                    print("Поток не завершился вовремя, принудительное завершение невозможно (daemon)")
+            else:
+                logging.warning("Попытка присоединиться к текущему потоку. Пропускаем join().")
         self.start_button.setText("Начать\nизмерение")
+        # Отключаем старый обработчик перед подключением нового
+        try:
+            self.start_button.clicked.disconnect()
+        except TypeError:
+            # Игнорируем ошибку, если нет подключенных обработчиков
+            pass
         self.start_button.clicked.connect(self.run_thread)
         # Обновляем доступность кнопки взятия спектра пустой кюветы в окне настроек, если оно открыто
         if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
             self.settings_window.fon_update_settings.setEnabled(True)
+        # Сбрасываем информацию о текущем канале
+        self.current_channel_label.setText("Не выбран")
         self.plot1.clear()
         self.plot2.clear()
-        
+
     def channel_measurement_thread(self):
         """Поток для измерения по каналам с переключением через ModBus"""
         self.icon_label.hide()
@@ -272,13 +311,16 @@ class Ui_MainWindow(object):
                 for channel_num in range(1, 13):  # Каналы от 1 до 12
                     # Проверяем, активен ли канал
                     if not channel_config.get(f"channel_{channel_num}", {}).get("active", False):
-                        logging.info(f"Канал {channel_num} неактивен, пропускаем")
+                        logging.info(f"Канал {channel_num} ({channel_config.get(f'channel_{channel_num}', {}).get('name', f'АТ-{channel_num}')}) неактивен, пропускаем")
                         continue
                         
+                    # Получаем имя канала
+                    channel_name = channel_config.get(f"channel_{channel_num}", {}).get("name", f"АТ-{channel_num}")
+                    
                     # Переключаемся на канал
-                    logging.info(f"\n=== ПЕРЕКЛЮЧЕНИЕ НА КАНАЛ {channel_num} ===")
+                    logging.info(f"\n=== ПЕРЕКЛЮЧЕНИЕ НА КАНАЛ {channel_num} ({channel_name}) ===")
                     if not switcher.switch_to_channel(channel_num, wait_time):
-                        logging.error(f"Не удалось переключиться на канал {channel_num}")
+                        logging.error(f"Не удалось переключиться на канал {channel_num} ({channel_name})")
                         if alarm_fix:
                             failed_attempts += 1
                             if failed_attempts >= max_attempts:
@@ -293,18 +335,19 @@ class Ui_MainWindow(object):
                             current_channel = utility_functions.get_active_channel()
                             if current_channel >= 0:
                                 channel_num = current_channel  # Используем текущий канал
-                                logging.info(f"Используем текущий канал: {channel_num}")
+                                channel_name = channel_config.get(f"channel_{channel_num}", {}).get("name", f"АТ-{channel_num}")
+                                logging.info(f"Используем текущий канал: {channel_num} ({channel_name})")
                             else:
                                 logging.error("Не удалось определить текущий канал")
                                 continue
                     
                     # Выполняем измерения для текущего канала
-                    logging.info(f"Начало измерений для канала {channel_num}")
+                    logging.info(f"Начало измерений для канала {channel_num} ({channel_name})")
                     for measurement in range(measurements_per_channel):
                         if utility_functions.stop_threads:
                             break
                             
-                        logging.info(f"Измерение {measurement+1}/{measurements_per_channel} для канала {channel_num}")
+                        logging.info(f"Измерение {measurement+1}/{measurements_per_channel} для канала {channel_num} ({channel_name})")
                         # Выполняем измерение
                         self.update_trans_plot_single()
                         
@@ -336,6 +379,15 @@ class Ui_MainWindow(object):
             self.settings_window.res_value.setText(str(fetch_data.res))
             self.settings_window.scans_value.setText(str(fetch_data.scans))
             self.settings_window.cuv_value.setText(str(fetch_data.cuv_length))
+            
+        # Получаем текущий активный канал и его имя
+        current_channel = utility_functions.get_active_channel()
+        if current_channel >= 0:
+            channel_name = utility_functions.get_channel_name(current_channel)
+            # Обновляем label с информацией о текущем канале
+            self.current_channel_label.setText(f"{channel_name}")
+        else:
+            self.current_channel_label.setText("Не выбран")
 
         if utility_functions.first_start:
             logging.info("Первый запуск - инициализация")
@@ -353,23 +405,33 @@ class Ui_MainWindow(object):
                         x, y, y2 = utility_functions.read_fon_spe()
                         logging.info("Фоновый спектр успешно прочитан")
                         self.plot1.update(x, y, y2)
+                        conc = [0]
+                        try:
+                            # Проверяем, указан ли путь к exequant.exe
+                            if not utility_functions.exequant_path:
+                                logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
+                            else:
+                                # Конвертируем спектр в строку для exequant
+                                spectrum_string = utility_functions.spe_to_spectrum_string()
 
-                        res, conc = utility_functions.get_value_func()
-                        logging.info(f"Получены значения концентраций: res={res}, conc={conc}")
+                                # Запускаем exequant и получаем значение T
+                                t_value = utility_functions.run_exequant(spectrum_string)
 
-                        if res == 0:
-                            # conc = [number for number in conc if number != 0]
-                            # self.param_plots(conc, False)
+                                if t_value is not None:
+                                    conc = [t_value]
+                                    logging.info(f"Получено значение 1 из exequant: {t_value}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при получении значения 1 из exequant: {e}")
+                            # Продолжаем измерение без обновления параметра T
 
-                            self.generate_warnings(warn)
-                            x, y = utility_functions.get_spectr_func()
-                            self.save_to_archive(conc, y)
-                            self.plot2.update(x, y)
-                            logging.info("Графики успешно обновлены")
-                        else:
-                            logging.error(f"Ошибка получения значений: {res}")
-                            self.error_out(res)
-                            return False
+                        self.generate_warnings(warn)
+                        x, y = utility_functions.get_spectr_func()
+                        self.save_to_archive(conc, y)
+                        self.plot2.update(x, y)
+
+                        # Обновляем график параметра с новыми значениями
+                        self.param_plots(conc, False)
+                        logging.info("Графики успешно обновлены")
                     except Exception as e:
                         logging.error(f"Ошибка при обработке данных: {e}")
                         return False
@@ -392,17 +454,36 @@ class Ui_MainWindow(object):
             if res == 0:
                 x, y, y2 = utility_functions.read_fon_spe()
                 self.plot1.update(x, y, y2)
-                res, conc = utility_functions.get_value_func()
-                if res == 0:
-                    # conc = [number for number in conc if number != 0]
-                    # self.param_plots(conc, False)
-                    self.generate_warnings(warn)
-                    x, y = utility_functions.get_spectr_func()
-                    self.save_to_archive(conc, y)
-                    self.plot2.update(x, y)
-                else:
-                    self.error_out(res)
-                    return False
+                conc = [0]
+                try:
+                    # Проверяем, указан ли путь к exequant.exe
+                    if not utility_functions.exequant_path:
+                        logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
+                    else:
+                        # Конвертируем спектр в строку для exequant
+                        spectrum_string = utility_functions.spe_to_spectrum_string()
+
+                        # Запускаем exequant и получаем значение T
+                        t_value = utility_functions.run_exequant(spectrum_string)
+
+                        if t_value is not None:
+                            # Добавляем значение T в первый параметр
+                            if len(conc) > 0:
+                                conc[0] = t_value
+                            else:
+                                conc = [t_value]
+                            logging.info(f"Получено значение T из exequant: {t_value}")
+                except Exception as e:
+                    logging.error(f"Ошибка при получении значения T из exequant: {e}")
+                    # Продолжаем измерение без обновления параметра T
+
+                self.generate_warnings(warn)
+                x, y = utility_functions.get_spectr_func()
+                self.save_to_archive(conc, y)
+                self.plot2.update(x, y)
+
+                # Обновляем график параметра с новыми значениями
+                self.param_plots(conc, False)
             else:
                 self.error_out(res)
                 return False
@@ -425,13 +506,44 @@ class Ui_MainWindow(object):
                 self.warnings_box.addItem(str(json_data["warnings"].get(str(i))))
 
     def error_out(self, res):
-        with open('config/config.json', 'r', encoding="utf-8") as file:
-            json_data = json.load(file)
-        if res > 0:
-            res = -500
-        self.fspec_error.setText("Ошибка! " + str(json_data["errors"].get(str(res))))
-        self.icon_label.show()
-        self.stop_thread()
+        # Защита от рекурсивного вызова
+        if hasattr(self, '_in_error_out') and self._in_error_out:
+            logging.warning("Рекурсивный вызов error_out предотвращен")
+            return
+            
+        self._in_error_out = True
+        try:
+            with open('config/config.json', 'r', encoding="utf-8") as file:
+                json_data = json.load(file)
+            if res > 0:
+                res = -500
+            self.fspec_error.setText("Ошибка! " + str(json_data["errors"].get(str(res))))
+            self.icon_label.show()
+            
+            # Проверяем, вызывается ли метод из потока измерения
+            if threading.current_thread() == threading.main_thread():
+                # Если вызывается из основного потока, останавливаем поток измерения
+                self.stop_thread()
+            else:
+                # Если вызывается из потока измерения, просто устанавливаем флаг остановки
+                utility_functions.stop_threads = True
+                self.stop_event.set()
+                # Обновляем UI через сигналы, чтобы избежать ошибок с доступом к UI из другого потока
+                QtCore.QMetaObject.invokeMethod(self.start_button, "setText", 
+                                              QtCore.Qt.QueuedConnection,
+                                              QtCore.Q_ARG(str, "Начать\nизмерение"))
+                # Используем QTimer для безопасного подключения сигнала в основном потоке
+                QtCore.QTimer.singleShot(0, lambda: self.start_button.clicked.connect(self.run_thread))
+                # Безопасно очищаем графики
+                QtCore.QTimer.singleShot(0, lambda: self.plot1.clear())
+                QtCore.QTimer.singleShot(0, lambda: self.plot2.clear())
+                # Сбрасываем информацию о текущем канале
+                QtCore.QTimer.singleShot(0, lambda: self.current_channel_label.setText("Не выбран"))
+                # Обновляем доступность кнопки взятия спектра пустой кюветы в окне настроек, если оно открыто
+                if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
+                    QtCore.QTimer.singleShot(0, lambda: self.settings_window.fon_update_settings.setEnabled(True))
+        finally:
+            self._in_error_out = False
 
     def update_trans_plot(self):
         self.icon_label.hide()
@@ -462,23 +574,37 @@ class Ui_MainWindow(object):
                                 x, y, y2 = utility_functions.read_fon_spe()
                                 logging.info("Фоновый спектр успешно прочитан")
                                 self.plot1.update(x, y, y2)
+                                conc[0] = 0
+                                try:
+                                    # Проверяем, указан ли путь к exequant.exe
+                                    if not utility_functions.exequant_path:
+                                        logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
+                                    else:
+                                        # Конвертируем спектр в строку для exequant
+                                        spectrum_string = utility_functions.spe_to_spectrum_string()
 
-                                res, conc = utility_functions.get_value_func()
-                                logging.info(f"Получены значения концентраций: res={res}, conc={conc}")
+                                        # Запускаем exequant и получаем значение T
+                                        t_value = utility_functions.run_exequant(spectrum_string)
 
-                                if res == 0:
-                                    # conc = [number for number in conc if number != 0]
-                                    # self.param_plots(conc, False)
+                                        if t_value is not None:
+                                            # Добавляем значение T в первый параметр
+                                            if len(conc) > 0:
+                                                conc[0] = t_value
+                                            else:
+                                                conc = [t_value]
+                                            logging.info(f"Получено значение T из exequant: {t_value}")
+                                except Exception as e:
+                                    logging.error(f"Ошибка при получении значения T из exequant: {e}")
+                                    # Продолжаем измерение без обновления параметра T
 
-                                    self.generate_warnings(warn)
-                                    x, y = utility_functions.get_spectr_func()
-                                    self.save_to_archive(conc, y)
-                                    self.plot2.update(x, y)
-                                    logging.info("Графики успешно обновлены")
-                                else:
-                                    logging.error(f"Ошибка получения значений: {res}")
-                                    self.error_out(res)
-                                    break
+                                self.generate_warnings(warn)
+                                x, y = utility_functions.get_spectr_func()
+                                self.save_to_archive(conc, y)
+                                self.plot2.update(x, y)
+
+                                # Обновляем график параметра с новыми значениями
+                                self.param_plots(conc, False)
+                                logging.info("Графики успешно обновлены")
                             except Exception as e:
                                 logging.error(f"Ошибка при обработке данных: {e}")
                                 break
@@ -501,22 +627,43 @@ class Ui_MainWindow(object):
                     if res == 0:
                         x, y, y2 = utility_functions.read_fon_spe()
                         self.plot1.update(x, y, y2)
-                        res, conc = utility_functions.get_value_func()
-                        if res == 0:
-                            self.generate_warnings(warn)
-                            x, y = utility_functions.get_spectr_func()
-                            self.save_to_archive(conc, y)
-                            self.plot2.update(x, y)
-                        else:
-                            self.error_out(res)
-                            break
+                        conc = [0]
+                        try:
+                            # Проверяем, указан ли путь к exequant.exe
+                            if not utility_functions.exequant_path:
+                                logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
+                            else:
+                                # Конвертируем спектр в строку для exequant
+                                spectrum_string = utility_functions.spe_to_spectrum_string()
+
+                                # Запускаем exequant и получаем значение T
+                                t_value = utility_functions.run_exequant(spectrum_string)
+
+                                if t_value is not None:
+                                    # Добавляем значение T в первый параметр
+                                    if len(conc) > 0:
+                                        conc[0] = t_value
+                                    else:
+                                        conc = [t_value]
+                                    logging.info(f"Получено значение T из exequant: {t_value}")
+                        except Exception as e:
+                            logging.error(f"Ошибка при получении значения T из exequant: {e}")
+                            # Продолжаем измерение без обновления параметра T
+
+                        self.generate_warnings(warn)
+                        x, y = utility_functions.get_spectr_func()
+                        self.save_to_archive(conc, y)
+                        self.plot2.update(x, y)
+
+                        # Обновляем график параметра с новыми значениями
+                        self.param_plots(conc, False)
                     else:
                         self.error_out(res)
                         break
                     self.timer1.restart()
-            if self.stop_event.wait(timeout=1):
-                logging.info("Получен сигнал остановки")
-                break
+                if self.stop_event.wait(timeout=1):
+                    logging.info("Получен сигнал остановки")
+                    break
 
     def set_fixed_fon(self):
         logging.info("Начало установки фиксированного фона")
@@ -583,14 +730,18 @@ class Ui_MainWindow(object):
             logging.info("Установка фиксированного фона завершена")
 
     def update_param_names(self):
-        for i in range(16):
-            self.params_labels[i].setText(utility_functions.parameter_names[i])
+        self.params_labels[0].setText(utility_functions.parameter_names[0])
 
     def param_plots(self, conc, build):
         conc = [number for number in conc if utility_functions.int_max > number > -utility_functions.int_max]
         if build:
             layout = QGridLayout(self.scrollAreaWidgetContents)
-            self.params_labels = [None] * 1
+            self.params_labels = [None] * 1  # Увеличиваем до 16 для всех возможных параметров
+            
+            # Убедимся, что у нас есть хотя бы один параметр
+            if len(conc) == 0:
+                conc = [0.0]  # Добавляем пустой параметр, если нет данных
+            
             for i in range(len(conc)):
                 self.params_labels[i] = QtWidgets.QLabel()
                 self.params_labels[i].setAlignment(QtCore.Qt.AlignCenter)
@@ -623,7 +774,12 @@ class Ui_MainWindow(object):
                 layout.addWidget(widget, i, 1, QtCore.Qt.AlignTop)
 
         else:
-            for i in range(len(conc)):
+            # Если параметров нет, ничего не делаем
+            if len(conc) == 0:
+                return
+            
+            # Обновляем только те параметры, которые есть в conc
+            for i in range(min(len(conc), len(self.param_values))):
                 self.param_values[i].setText("{:.2f}".format(conc[i]))
                 utility_functions.parameter[i].update(conc[i], utility_functions.params_interval)
                 utility_functions.parameter[i].show()
@@ -662,7 +818,7 @@ class Ui_MainWindow(object):
         self.settings = QHBoxLayout()
         self.settings.setObjectName("settings")
 
-        button_font = QtGui.QFont("Arial", 7)
+        button_font = QtGui.QFont("Arial", 10)
 
         start_layout = QGridLayout()
         self.start_button = QtWidgets.QPushButton()
@@ -708,6 +864,26 @@ class Ui_MainWindow(object):
         start_layout.addLayout(self.label_layout, 1, 0, 1, 3)
         self.upper_left.addLayout(start_layout)
 
+        # Добавляем блок для отображения текущего канала
+        channel_layout = QVBoxLayout()
+        channel_title = QtWidgets.QLabel("Текущий канал")
+        channel_title.setAlignment(QtCore.Qt.AlignCenter)
+        channel_title_font = QtGui.QFont("Arial", 10)
+        channel_title_font.setBold(True)
+        channel_title.setFont(channel_title_font)
+        
+        self.current_channel_label = ElidedLabel("Не выбран")
+        self.current_channel_label.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop)
+        channel_font = QtGui.QFont("Arial", 10)
+        self.current_channel_label.setFont(channel_font)
+        self.current_channel_label.setFixedWidth(150)
+        self.current_channel_label.setTextInteractionFlags(QtCore.Qt.NoTextInteraction)
+        
+        channel_layout.addWidget(channel_title)
+        channel_layout.addWidget(self.current_channel_label)
+        
+        self.upper_left.addLayout(channel_layout)
+
         self.settings_button = QtWidgets.QPushButton()
         self.settings_button.setFixedSize(130, 100)
         self.settings_button.setFont(button_font)
@@ -730,7 +906,7 @@ class Ui_MainWindow(object):
         self.scrollAreaWidgetContents = QtWidgets.QWidget()
         self.scrollArea.setWidget(self.scrollAreaWidgetContents)
 
-        self.param_values = []
+        self.param_values = []  # Инициализируем пустой список для param_values
 
         self.plots_layout = QVBoxLayout()
 

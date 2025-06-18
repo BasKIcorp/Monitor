@@ -1,0 +1,57 @@
+{
+    "params": {
+        "wait_time": 30,
+        "alarm_fix": false,
+        "attempts": 3,
+        "background_period": 60,
+        "measurements": 5
+    },
+    "channel_1": {
+        "active": true,
+        "name": "\u0410\u0422-1"
+    },
+    "channel_2": {
+        "active": false,
+        "name": "\u0410\u0422-2"
+    },
+    "channel_3": {
+        "active": false,
+        "name": "\u0410\u0422-3"
+    },
+    "channel_4": {
+        "active": false,
+        "name": "\u0410\u0422-4"
+    },
+    "channel_5": {
+        "active": false,
+        "name": "\u0410\u0422-5"
+    },
+    "channel_6": {
+        "active": false,
+        "name": "\u0410\u0422-6"
+    },
+    "channel_7": {
+        "active": false,
+        "name": "\u0410\u0422-7"
+    },
+    "channel_8": {
+        "active": false,
+        "name": "\u0410\u0422-8"
+    },
+    "channel_9": {
+        "active": false,
+        "name": "\u0410\u0422-9"
+    },
+    "channel_10": {
+        "active": false,
+        "name": "\u0410\u0422-10"
+    },
+    "channel_11": {
+        "active": false,
+        "name": "\u0410\u0422-11"
+    },
+    "channel_12": {
+        "active": false,
+        "name": "\u0410\u0422-12"
+    }
+}
