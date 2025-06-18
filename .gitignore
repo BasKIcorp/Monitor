@@ -1,10 +1,11 @@
 FSM24.dll
-FSM24.ini
-FSMTypes.ini
 GAS.dll
-GAS.ini
 /build
 /dist
-/Reports
 /.idea
 /__pycache__
+plot_error.log
+main.spec
+main.exe
+main1.exe
+src/gui_old.py

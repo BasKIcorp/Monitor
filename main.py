@@ -6,7 +6,7 @@ from PyQt5 import QtGui
 import platform
 import os
 
-from src.gui import Ui_MainWindow  # Import the generated module
+from src.gui import Ui_MainWindow, set_application_font  # Import the generated module
 
 # Настройка логгирования
 def setup_logging():
@@ -44,12 +44,15 @@ class MyMainWindow(QMainWindow):
         logging.info('Настройка пользовательского интерфейса')
         self.ui.setupUi(self)
         
-        # Устанавливаем иконку окна
+        # Устанавливаем иконку окна и шрифт
         try:
             self.setWindowIcon(QtGui.QIcon('logo.jpg'))
-            logging.info('Иконка окна установлена')
+            # Устанавливаем шрифт Arial для главного окна
+            font = QtGui.QFont("Arial")
+            self.setFont(font)
+            logging.info('Иконка окна и шрифт установлены')
         except Exception as e:
-            logging.error(f'Ошибка при установке иконки окна: {e}')
+            logging.error(f'Ошибка при установке иконки окна или шрифта: {e}')
 
         # Добавляем информацию о разрядности Python
         logging.info(f"Python разрядность: {platform.architecture()}")
@@ -65,6 +68,13 @@ if __name__ == "__main__":
     logging.info('Запуск приложения')
     try:
         app = QApplication([])
+        set_application_font(app)
+        # Применяем стиль из QSS-файла
+        try:
+            app.setStyleSheet(Path('resources/themes/light.qss').read_text())
+            logging.info('Стиль QSS успешно применен')
+        except Exception as e:
+            logging.error(f'Ошибка при применении стиля QSS: {e}')
         window = MyMainWindow()
         logging.info('Открытие окна в полноэкранном режиме')
         window.showMaximized()
