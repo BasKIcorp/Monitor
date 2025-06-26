@@ -14,5 +14,10 @@ class TransmissionPlot(pg.PlotItem):
 
     def update(self, x, y):
         self.clear()
-        intensity_data = pg.PlotDataItem(x, y, pen=(2, 80, 158))
+        intensity_data = pg.PlotDataItem(x, y, pen=(2, 80, 158), width=4)
         self.addItem(intensity_data)
+
+        # Принудительное обновление графика
+        if self.scene() and self.scene().views():
+            for view in self.scene().views():
+                view.update()

@@ -14,11 +14,14 @@ import json
 import time
 import subprocess
 import math
+from PyQt5.QtCore import QObject, pyqtSignal
 
 # Глобальные переменные
+from src import fetch_data
+
 first_start = True
 int_max = 100000
-simulation = 1
+simulation = 0  # Целочисленный тип (0 или 1)
 theme = ""
 method_path = "resources/data/test-2.mtg"
 fspec_path = "Не выбран"
@@ -35,6 +38,46 @@ timeout = 0
 zoom = True
 
 master = None
+
+
+# Класс для передачи сигналов ошибок в GUI
+class ErrorSignalEmitter(QObject):
+    error_signal = pyqtSignal(str)
+
+    def emit_error(self, error_text):
+        """Отправляет сигнал с текстом ошибки"""
+        self.error_signal.emit(error_text)
+
+
+# Создаем глобальный экземпляр эмиттера сигналов
+error_emitter = ErrorSignalEmitter()
+
+
+# Функция для отправки ошибки в GUI
+def send_error_to_gui(error_text):
+    logging.error(error_text)  # Логируем ошибку
+    error_emitter.emit_error(error_text)  # Отправляем сигнал
+
+
+# Функция для загрузки параметра simulation из конфиг-файла
+def load_simulation_from_config():
+    global simulation
+    try:
+        if os.path.exists('config/config.json'):
+            with open('config/config.json', 'r', encoding="utf-8") as file:
+                json_data = json.load(file)
+
+            # Загружаем параметр simulation и приводим к int
+            if "simulation" in json_data:
+                simulation = int(json_data["simulation"])
+                logging.info(f"Загружен параметр simulation: {simulation}")
+    except Exception as e:
+        send_error_to_gui(f"Ошибка при загрузке параметра simulation: {e}")
+        # В случае ошибки используем значение по умолчанию
+        simulation = 0
+
+    return simulation
+
 
 # Константы для работы с каналами
 CHANNEL_REQUEST_REGISTER = 16400
@@ -66,30 +109,29 @@ STATUS_BITS = {
 }
 
 # GAS.dll functions below
-dll_path = "resources/drivers/GAS.dll"
+dll_path = "./GAS.dll"
 my_dll = ctypes.WinDLL(dll_path)
 
 # Путь к exequant.exe
 exequant_path = ""
 
+
 class ChannelSwitcher:
     def __init__(self):
-        """Инициализация объекта для управления переключением каналов"""
         self.is_initialized = False
         self.current_channel = None
         self.max_channels = 12
-        
+
     def read_status(self):
-        """Чтение и расшифровка регистра статуса"""
         global master, device_num
-        
+
         if not modbus_connected or master is None:
             logging.error("Нет соединения с ModBus для чтения статуса")
             return None
-            
+
         try:
             status = master.execute(device_num, cst.READ_HOLDING_REGISTERS, STATUS_REGISTER, 1)[0]
-            
+
             status_info = {
                 'raw_value': status,
                 'binary': bin(status),
@@ -106,68 +148,66 @@ class ChannelSwitcher:
                 'lower_sensor': bool(status & (1 << STATUS_BITS['LOWER_SENSOR'])),
                 'cell_sensor': bool(status & (1 << STATUS_BITS['CELL_SENSOR']))
             }
-            
+
             logging.info(f"Статус устройства: {status_info['binary']} ({status_info['raw_value']})")
             return status_info
-            
+
         except Exception as e:
-            logging.error(f"Ошибка при чтении статуса: {e}")
+            send_error_to_gui(f"Ошибка при чтении статуса: {e}")
             return None
-    
+
     def wait_for_ready_state(self, timeout=60):
-        """Ожидание готовности устройства"""
         logging.info(f"Ожидание готовности устройства (таймаут: {timeout} сек)...")
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             status = self.read_status()
             if status and status['ready'] and not status['working']:
                 logging.info("Устройство готово к работе")
                 return True
             elif status and status['general_error']:
-                logging.error("Обнаружена ошибка устройства")
+                send_error_to_gui("Обнаружена ошибка устройства")
                 return False
-            
+
             time.sleep(1)
-        
-        logging.error(f"Таймаут ожидания готовности устройства ({timeout} сек)")
+
+        send_error_to_gui(f"Таймаут ожидания готовности устройства ({timeout} сек)")
         return False
-    
+
     def request_channel_switch(self, target_channel):
-        """Запрос переключения на указанный канал"""
         global master, device_num
-        
+
         if target_channel < 0 or target_channel > self.max_channels:
-            logging.error(f"Недопустимый номер канала: {target_channel}. Допустимый диапазон: 0-{self.max_channels}")
+            send_error_to_gui(
+                f"Недопустимый номер канала: {target_channel}. Допустимый диапазон: 0-{self.max_channels}")
             return False
-        
+
         if not modbus_connected or master is None:
-            logging.error("Нет соединения с ModBus для переключения канала")
+            send_error_to_gui("Нет соединения с ModBus для переключения канала")
             return False
-        
+
         try:
             # Значение записывается со смещением +1
             register_value = target_channel + 1
             logging.info(f"Запрос переключения на канал {target_channel} (значение регистра: {register_value})")
-            
+
             master.execute(device_num, cst.WRITE_SINGLE_REGISTER, CHANNEL_REQUEST_REGISTER, output_value=register_value)
             logging.info(f"Запрос на переключение отправлен")
             return True
-            
+
         except Exception as e:
-            logging.error(f"Ошибка при отправке запроса переключения: {e}")
+            send_error_to_gui(f"Ошибка при отправке запроса переключения: {e}")
             return False
-    
+
     def monitor_channel_switching(self, target_channel, timeout=60):
-        """Мониторинг процесса переключения канала"""
         logging.info(f"=== НАЧАЛО ПЕРЕКЛЮЧЕНИЯ НА КАНАЛ {target_channel} ===")
         start_time = time.time()
-        
+
         # Определяем направление движения
         current = get_active_channel()
         if current == -1:
             return False
-        
+
         if target_channel > current:
             direction = "вверх"
             logging.info(f"Направление движения: {direction} (от канала {current} к каналу {target_channel})")
@@ -177,7 +217,7 @@ class ChannelSwitcher:
         else:
             logging.info(f"Уже находимся на канале {target_channel}")
             return True
-        
+
         # Ожидание начала работы
         logging.info("Ожидание деактивации бита 'Готов' и активации бита 'В работе'...")
         while time.time() - start_time < timeout:
@@ -187,35 +227,35 @@ class ChannelSwitcher:
                 break
             time.sleep(0.5)
         else:
-            logging.error("Переключение не началось в ожидаемое время")
+            send_error_to_gui("Переключение не началось в ожидаемое время")
             return False
-        
+
         # Мониторинг процесса переключения
         logging.info("Мониторинг процесса переключения...")
         last_channel = current
-        
+
         while time.time() - start_time < timeout:
             status = self.read_status()
             if not status:
                 continue
-            
+
             # Проверяем текущий канал
             current_channel = get_active_channel()
             if current_channel != -1 and current_channel != last_channel:
                 logging.info(f"✓ Переключение: канал {last_channel} → канал {current_channel}")
                 last_channel = current_channel
-                
+
                 if current_channel == target_channel:
                     logging.info(f"✓ Достигнут целевой канал {target_channel}")
                     break
-            
+
             # Проверяем ошибки
             if status['general_error']:
-                logging.error("Обнаружена ошибка во время переключения")
+                send_error_to_gui("Обнаружена ошибка во время переключения")
                 return False
-            
+
             time.sleep(1)
-        
+
         # Ожидание завершения переключения
         logging.info("Ожидание завершения переключения...")
         while time.time() - start_time < timeout:
@@ -227,254 +267,204 @@ class ChannelSwitcher:
                     self.current_channel = final_channel
                     return True
                 else:
-                    logging.error(f"Переключение завершено, но канал не соответствует ожидаемому: {final_channel} != {target_channel}")
+                    logging.error(
+                        f"Переключение завершено, но канал не соответствует ожидаемому: {final_channel} != {target_channel}")
                     return False
-            
+
             time.sleep(0.5)
-        
-        logging.error(f"Переключение не завершилось в течение {timeout} секунд")
+
+        send_error_to_gui(f"Переключение не завершилось в течение {timeout} секунд")
         return False
-    
+
     def switch_to_channel(self, target_channel, wait_time=30):
-        """Основная функция переключения канала"""
-        logging.info(f"\n{'='*50}")
+        logging.info(f"\n{'=' * 50}")
         logging.info(f"ЗАПРОС ПЕРЕКЛЮЧЕНИЯ НА КАНАЛ {target_channel}")
-        logging.info(f"{'='*50}")
-        
+        logging.info(f"{'=' * 50}")
+
         # Проверяем готовность устройства
         if not self.wait_for_ready_state(timeout=10):
-            logging.error("Устройство не готово к переключению")
+            send_error_to_gui("Устройство не готово к переключению")
             return False
-        
+
         # Отправляем запрос на переключение
         if not self.request_channel_switch(target_channel):
             return False
-        
+
         # Мониторим переключение канала
         return self.monitor_channel_switching(target_channel, timeout=wait_time)
 
     def monitor_initialization(self, timeout=120):
-        """Мониторинг процесса инициализации"""
         logging.info("=== НАЧАЛО МОНИТОРИНГА ИНИЦИАЛИЗАЦИИ ===")
         start_time = time.time()
-        
+
         # Ожидание завершения инициализации
         logging.info("Ожидание завершения инициализации...")
-        
+
         while time.time() - start_time < timeout:
             status = self.read_status()
             if not status:
                 continue
-                
+
             # Проверяем биты статуса для определения завершения инициализации
             if status['initialization'] and status['ready'] and not status['working']:
                 logging.info("✓ Инициализация завершена успешно!")
-                
+
                 # Проверяем количество найденных каналов
                 count = get_channels_count()
                 if count > 0:
                     logging.info(f"✓ Найдено каналов: {count}")
-                
+
                 # Проверяем текущий канал после инициализации
                 current_channel = get_active_channel()
                 logging.info(f"Текущий канал после инициализации: {current_channel}")
-                
+
                 self.is_initialized = True
                 return True
-            
+
             time.sleep(0.5)
-        
-        logging.error(f"Инициализация не завершилась в течение {timeout} секунд")
+
+        send_error_to_gui(f"Инициализация не завершилась в течение {timeout} секунд")
         return False
+
 
 # Глобальный объект для работы с каналами
 channel_switcher = ChannelSwitcher()
 
 
 def check_modbus_connection():
-    """Проверяет соединение с ModBus"""
     global modbus_connected, master, device_num, simulation
-    
+
     # Если включен режим симуляции, считаем что соединение есть
-    if simulation == "1":
+    if simulation == 1:
         logging.info("Режим симуляции активен, проверка ModBus пропущена")
         return True
-    
+
     if not modbus_connected or master is None:
         logging.info("ModBus не подключен или мастер не инициализирован")
         return False
-    
+
     try:
         # Пытаемся прочитать статусный регистр
         status = master.execute(device_num, cst.READ_HOLDING_REGISTERS, STATUS_REGISTER, 1)[0]
         logging.info(f"ModBus соединение активно, статус устройства: {bin(status)}")
         return True
     except Exception as e:
-        logging.error(f"Ошибка соединения ModBus: {e}")
+        send_error_to_gui(f"Ошибка соединения ModBus: {e}")
         modbus_connected = False
         return False
 
 
 def switch_to_channel(channel_number):
-    """
-    Отправляет запрос на переключение на указанный канал
-    
-    Args:
-        channel_number: Номер канала (0-12)
-        
-    Returns:
-        bool: True если запрос отправлен успешно, False в случае ошибки
-    """
     global channel_switcher
     return channel_switcher.switch_to_channel(channel_number)
 
 
 def get_active_channel():
-    """
-    Получает номер активного канала
-    
-    Returns:
-        int: Номер активного канала (0-12) или -1 в случае ошибки
-    """
-    global master, device_num
-    
+    global master, device_num, simulation
+
+    # В режиме симуляции возвращаем канал 1
+    if simulation == 1:
+        logging.info("Режим симуляции активен, возвращаем канал 1")
+        return 1
+
     if not modbus_connected or master is None:
-        logging.error("Нет соединения с ModBus для получения активного канала")
+        error_msg = "Нет соединения с ModBus для получения активного канала"
+        send_error_to_gui(error_msg)
         return -1
-    
+
     try:
         # Канал возвращается со смещением +1
         channel = master.execute(device_num, cst.READ_HOLDING_REGISTERS, CHANNEL_CONFIRM_REGISTER, 1)[0] - 1
         logging.info(f"Текущий активный канал: {channel}")
         return channel
     except Exception as e:
-        logging.error(f"Ошибка при получении активного канала: {e}")
+        error_msg = f"Ошибка при получении активного канала: {e}"
+        send_error_to_gui(error_msg)
         return -1
 
 
 def get_channels_count():
-    """
-    Получает количество доступных каналов
-    
-    Returns:
-        int: Количество доступных каналов или -1 в случае ошибки
-    """
     global master, device_num
-    
+
     if not modbus_connected or master is None:
-        logging.error("Нет соединения с ModBus для получения количества каналов")
+        send_error_to_gui("Нет соединения с ModBus для получения количества каналов")
         return -1
-    
+
     try:
         count = master.execute(device_num, cst.READ_HOLDING_REGISTERS, CHANNELS_COUNT_REGISTER, 1)[0]
         logging.info(f"Количество доступных каналов: {count}")
         return count
     except Exception as e:
-        logging.error(f"Ошибка при получении количества каналов: {e}")
+        send_error_to_gui(f"Ошибка при получении количества каналов: {e}")
         return -1
 
 
 def get_status():
-    """
-    Получает статус устройства
-    
-    Returns:
-        int: Битовая маска статуса или -1 в случае ошибки
-    """
     global master, device_num
-    
+
     if not modbus_connected or master is None:
-        logging.error("Нет соединения с ModBus для получения статуса")
+        send_error_to_gui("Нет соединения с ModBus для получения статуса")
         return -1
-    
+
     try:
         status = master.execute(device_num, cst.READ_HOLDING_REGISTERS, STATUS_REGISTER, 1)[0]
         logging.info(f"Статус устройства: {bin(status)}")
         return status
     except Exception as e:
-        logging.error(f"Ошибка при получении статуса: {e}")
+        send_error_to_gui(f"Ошибка при получении статуса: {e}")
         return -1
 
 
 def is_device_ready():
-    """
-    Проверяет, готово ли устройство к переключению канала
-    
-    Returns:
-        bool: True если устройство готово, False в противном случае
-    """
     status = get_status()
     if status == -1:
         return False
-    
+
     # Проверяем бит готовности (бит 1)
     return (status & (1 << STATUS_READY)) != 0
 
 
 def is_device_working():
-    """
-    Проверяет, находится ли устройство в процессе работы
-    
-    Returns:
-        bool: True если устройство в работе, False в противном случае
-    """
     status = get_status()
     if status == -1:
         return False
-    
+
     # Проверяем бит "в работе" (бит 2)
     return (status & (1 << STATUS_WORKING)) != 0
 
 
 def has_error():
-    """
-    Проверяет наличие ошибок
-    
-    Returns:
-        bool: True если есть ошибка, False в противном случае
-    """
     status = get_status()
     if status == -1:
         return True
-    
+
     # Проверяем бит общей ошибки (бит 3)
     return (status & (1 << STATUS_ERROR)) != 0
 
 
 def wait_for_channel_switch(target_channel, timeout_sec):
-    """
-    Ожидает переключения на целевой канал с таймаутом
-    
-    Args:
-        target_channel: Целевой канал
-        timeout_sec: Таймаут в секундах
-        
-    Returns:
-        bool: True если переключение успешно, False в случае таймаута или ошибки
-    """
     global channel_switcher
     return channel_switcher.monitor_channel_switching(target_channel, timeout=timeout_sec)
 
 
 def load_channel_config():
-    """Загружает настройки каналов из файла конфигурации"""
     config = {
         "params": {
-            "wait_time": 30,       # Время ожидания подтверждения (tп)
-            "alarm_fix": False,     # Фиксация аварии системы (АСПК)
-            "attempts": 3,         # Количество попыток переключения (k)
-            "background_period": 60, # Период измерения фонового спектра (tф)
-            "measurements": 5       # Количество измерений канала (n)
+            "wait_time": 30,  # Время ожидания подтверждения (tп)
+            "alarm_fix": False,  # Фиксация аварии системы (АСПК)
+            "attempts": 3,  # Количество попыток переключения (k)
+            "background_period": 60,  # Период измерения фонового спектра (tф)
+            "measurements": 5  # Количество измерений канала (n)
         }
     }
-    
+
     # Настройки по умолчанию для каждого канала
     for i in range(1, 13):  # 12 каналов
         config[f"channel_{i}"] = {
             "active": i == 1,  # По умолчанию активен только первый канал
             "name": f"АТ-{i}"  # Имя канала по умолчанию
         }
-    
+
     # Пытаемся загрузить существующие настройки
     try:
         if os.path.exists('config/channel_config.json'):
@@ -487,106 +477,89 @@ def load_channel_config():
                     else:
                         config[key] = value
     except Exception as e:
-        logging.error(f"Ошибка при загрузке настроек каналов: {e}")
-    
+        send_error_to_gui(f"Ошибка при загрузке настроек каналов: {e}")
+
     return config
 
 
 def get_channel_name(channel_num):
-    """Получает имя канала из конфигурации"""
     if channel_num < 0 or channel_num > 12:
         return f"Канал {channel_num}"
-        
+
     config = load_channel_config()
     return config.get(f"channel_{channel_num}", {}).get("name", f"АТ-{channel_num}")
 
 
-def read_fon_spe(spe_file="Spectra/fon.spe"):
+def read_fon_spe(spe_file="./Spectra/fon.spe"):
     binary_data = b""
     with open(spe_file, 'rb') as file:
         data = file.readlines()
-        for line in data[36:-1]:
+        for line in data[37:-1]:
             binary_data += line
-        x_first = float(data[32].decode("utf-8")[data[32].decode("utf-8").find("=") + 1:])
-        x_last = float(data[33].decode("utf-8")[data[33].decode("utf-8").find("=") + 1:])
-    with open("Spectra/values_bin.txt", "wb") as newFile:
+        x_first = float(data[33].decode("utf-8")[data[33].decode("utf-8").find("=") + 1:])
+        x_last = float(data[34].decode("utf-8")[data[34].decode("utf-8").find("=") + 1:])
+    with open("./Spectra/values_bin.txt", "wb") as newFile:
         newFile.write(binary_data)
-    arr = np.fromfile("Spectra/values_bin.txt", dtype=np.single)
+    arr = np.fromfile("./Spectra/values_bin.txt", dtype=np.single)
     x_values = []
+
+    # Используем файл previous_fon.spe вместо поиска в директории Original
     binary_data = b""
-    with open('Spectra/original.spe', 'rb') as file:
+    previous_fon_file = "./Spectra/empty_fon.spe"
+
+    if not os.path.exists(previous_fon_file):
+        send_error_to_gui("Файл empty_fon.spe не найден")
+        return [], [], []
+
+    with open(previous_fon_file, 'rb') as file:
         data = file.readlines()
-        for line in data[36:-1]:
+        for line in data[37:-1]:
             binary_data += line
-    with open("Spectra/values_bin.txt", "wb") as newFile:
+    with open("./Spectra/values_bin.txt", "wb") as newFile:
         newFile.write(binary_data)
 
-    second_arr = np.fromfile("Spectra/values_bin.txt", dtype=np.single)
+    second_arr = np.fromfile("./Spectra/values_bin.txt", dtype=np.single)
     for i in range(len(arr)):
         x_values.append(x_first + (i * ((x_last - x_first) / len(arr))))
     return x_values, arr, second_arr
 
 
 def start_func():
-    # pass
-    start_function = my_dll.Start
-    start_function.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    start_function.restypes = [ctypes.c_int]
-    warning = (ctypes.c_int * 1)()
-    result = start_function(warning)
-    return result, warning[0]
+    if my_dll is None:
+        error_msg = "DLL не загружена, невозможно выполнить функцию Start"
+        send_error_to_gui(error_msg)
+        return -1, 0
+        
+    try:
+        start_function = my_dll.Start
+        start_function.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        start_function.restypes = [ctypes.c_int]
+        warning = (ctypes.c_int * 1)()
+        result = start_function(warning)
+        return result, warning[0]
+    except Exception as e:
+        error_msg = f"Ошибка при вызове функции Start из DLL: {str(e)}"
+        send_error_to_gui(error_msg)
+        return -1, 0
 
 
 def init_func():
-    # pass
-    init_function = my_dll.Init
-    init_function.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    init_function.restypes = [ctypes.c_int]
-    warning = (ctypes.c_int * 1)()
-    result = init_function(warning)
-    return result, warning[0]
-
-
-def get_value_func():
-    getValue_function = my_dll.GetValueFile
-    getValue_function.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_double),
-                                  ctypes.c_char_p]
-    getValue_function.restypes = [ctypes.c_int]
-    method = ctypes.c_char_p(method_path.encode('utf-8'))
-    list_of_files = glob.glob('Spectra/*')[-4:][0]
-    spectre = ctypes.c_char_p(str(list_of_files).encode('utf-8'))
-    conc = (ctypes.c_double * 16)()
-    password = b""
-    result = getValue_function(method, spectre, conc, password)
-    return result, list(conc)
-
-
-def get_spectr_func():
-    binary_data = b""
-    with open('Spectra/fon.spe', 'rb') as file:
-        data = file.readlines()
-        for line in data[36:-1]:
-            binary_data += line
-        x_first = float(data[32].decode("utf-8")[data[32].decode("utf-8").find("=") + 1:])
-        x_last = float(data[33].decode("utf-8")[data[33].decode("utf-8").find("=") + 1:])
-    with open("Spectra/values_bin.txt", "wb") as newFile:
-        newFile.write(binary_data)
-    arr = np.fromfile("Spectra/values_bin.txt", dtype=np.single)
-    x_values = []
-    binary_data = b""
-    with open('Spectra/original.spe', 'rb') as file:
-        data = file.readlines()
-        for line in data[36:-1]:
-            binary_data += line
-    with open("Spectra/values_bin.txt", "wb") as newFile:
-        newFile.write(binary_data)
-
-    second_arr = np.fromfile("Spectra/values_bin.txt", dtype=np.single)
-    for i in range(len(arr)):
-        arr[i] = abs(arr[i] - second_arr[i])
-    for i in range(len(arr)):
-        x_values.append(x_first + (i * ((x_last - x_first) / len(arr))))
-    return x_values, list(arr)
+    if my_dll is None:
+        error_msg = "DLL не загружена, невозможно выполнить функцию Init"
+        send_error_to_gui(error_msg)
+        return -1, 0
+        
+    try:
+        init_function = my_dll.Init
+        init_function.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        init_function.restypes = [ctypes.c_int]
+        warning = (ctypes.c_int * 1)()
+        result = init_function(warning)
+        return result, warning[0]
+    except Exception as e:
+        error_msg = f"Ошибка при вызове функции Init из DLL: {str(e)}"
+        send_error_to_gui(error_msg)
+        return -1, 0
 
 
 def change_param_size(text):
@@ -596,143 +569,198 @@ def change_param_size(text):
 
 
 def is_device_initialized():
-    """
-    Проверяет, инициализировано ли устройство
-    
-    Returns:
-        bool: True если устройство инициализировано, False в противном случае
-    """
     status = get_status()
     if status == -1:
         return False
-    
+
     # Проверяем бит инициализации (бит 0)
     return (status & (1 << STATUS_BITS['INITIALIZATION'])) != 0
 
 
 # Функция для инициализации устройства
 def initialize_device():
-    """
-    Запускает процесс инициализации устройства
-    
-    Returns:
-        bool: True если запрос на инициализацию отправлен успешно, False в случае ошибки
-    """
     global master, device_num
-    
+
     if not modbus_connected or master is None:
-        logging.error("Нет соединения с ModBus для инициализации устройства")
+        send_error_to_gui("Нет соединения с ModBus для инициализации устройства")
         return False
-    
+
     try:
         # Для начала инициализации отправляем запрос на переключение на канал 1
         # В документации указано, что при первом запросе на переключение начинается инициализация
-        master.execute(device_num, cst.WRITE_SINGLE_REGISTER, CHANNEL_REQUEST_REGISTER, output_value=2)  # Канал 1 + смещение 1
+        master.execute(device_num, cst.WRITE_SINGLE_REGISTER, CHANNEL_REQUEST_REGISTER,
+                       output_value=2)  # Канал 1 + смещение 1
         logging.info("✓ Запрос на инициализацию отправлен")
         return True
     except Exception as e:
-        logging.error(f"Ошибка при запуске инициализации: {e}")
-        return False 
+        send_error_to_gui(f"Ошибка при запуске инициализации: {e}")
+        return False
 
 
-def spe_to_spectrum_string(spe_file="Spectra/fon.spe"):
-    """
-    Преобразует данные из SPE файла в строку формата "x1,y1;x2,y2;..."
-    для передачи в exequant.exe
-    """
-    try:
-        # Проверяем существование файла
-        if not os.path.exists(spe_file):
-            logging.error(f"Файл спектра не найден: {spe_file}")
-            return ""
-            
-        # Читаем данные из SPE файла
-        x, y, _ = read_fon_spe(spe_file)
-        
-        # Проверяем, что данные не пустые
-        if not x or not y or len(x) != len(y):
-            logging.error(f"Некорректные данные спектра из файла {spe_file}: x={len(x)}, y={len(y)}")
-            return ""
-        
-        # Создаем строку формата "x1,y1;x2,y2;..."
-        spectrum_points = []
-        for i in range(len(x)):
-            # Проверяем, что значения не являются NaN или бесконечностью
-            if math.isnan(x[i]) or math.isnan(y[i]) or math.isinf(x[i]) or math.isinf(y[i]):
-                continue
-            spectrum_points.append(f"{x[i]},{y[i]}")
-        
-        # Проверяем, что у нас есть точки для спектра
-        if not spectrum_points:
-            logging.error(f"Нет валидных точек спектра в файле {spe_file}")
-            return ""
-            
-        # Ограничиваем количество точек, если их слишком много
-        if len(spectrum_points) > 1000:
-            logging.warning(f"Слишком много точек спектра ({len(spectrum_points)}), ограничиваем до 1000")
-            # Выбираем равномерно распределенные точки
-            step = len(spectrum_points) // 1000
-            spectrum_points = spectrum_points[::step][:1000]
-        
-        result = ";".join(spectrum_points)
-        logging.info(f"Спектр успешно преобразован в строку ({len(spectrum_points)} точек)")
-        return result
-    except Exception as e:
-        logging.error(f"Ошибка преобразования SPE в строку спектра: {e}")
-        return ""
+def spectrum_to_dat(x_values, y_values):
+    count_value = len(y_values)
 
-def run_exequant(spectrum_string, model="1.mmq"):
-    """
-    Запускает exequant.exe с указанным спектром и моделью
-    Возвращает значение параметра T из JSON ответа
-    """
+    if exequant_path:
+        exequant_dir = os.path.dirname(exequant_path)
+
+        # Определяем путь к файлу 1.dat
+        dat_file_path = os.path.join(exequant_dir, "input.dat")
+
+        try:
+            with open(dat_file_path, 'w') as dat_file:
+                for i in range(count_value):
+                    dat_file.write(f"{x_values[i]:.6E}\t{y_values[i]:.7E}\n")
+                dat_file.write(f"{12501.55:.6E}\t{y_values[count_value - 1]:.7E}\n")
+
+            logging.info(f"Файл input.dat успешно создан по пути: {dat_file_path}")
+            return 0
+        except Exception as e:
+            logging.error(f"Ошибка при записи файла input.dat: {e}")
+    else:
+        logging.error("Путь к exequant не задан, невозможно создать файл input.dat")
+
+    return -1
+
+
+def run_exequant():
+    print(exequant_path)
+    exequant_dir = os.path.dirname(exequant_path)
+    input_spectrum_path = os.path.join(exequant_dir, "input.dat")
+    model = os.path.join(exequant_dir, "1.mmq")
+
     if not exequant_path:
-        logging.warning("Путь к exequant.exe не указан")
+        logging.error("Путь к exequant.exe не указан")
         return None
-        
+
     if not os.path.exists(exequant_path):
         logging.error(f"Файл exequant.exe не найден по указанному пути: {exequant_path}")
         return None
-        
+
+    if not os.path.exists(input_spectrum_path):
+        logging.error(f"Файл спектра .dat не найден: {input_spectrum_path}")
+        return None
+
     try:
         # Формируем команду
-        cmd = f'"{exequant_path}" --model {model} --only_print --spectrum "{spectrum_string}"'
-        
-        # Запускаем процесс
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-        
+        cmd = f'"{exequant_path}" --model {model} --input "{input_spectrum_path}" --only_print'
+
+        # Запускаем процесс с контролем ошибок
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            logging.error("Превышено время ожидания выполнения exequant.exe (30 секунд)")
+            return None
+        except subprocess.SubprocessError as e:
+            logging.error(f"Ошибка при запуске процесса exequant.exe: {str(e)}")
+            return None
+
         # Проверяем код возврата
         if result.returncode != 0:
             logging.error(f"Ошибка выполнения exequant.exe, код возврата: {result.returncode}")
             logging.error(f"Сообщение об ошибке: {result.stderr}")
             return None
-        
+
         # Проверяем наличие вывода
         if not result.stdout:
             logging.error("Пустой вывод от exequant.exe")
             return None
-            
+
         try:
             # Парсим JSON из вывода
             result_json = json.loads(result.stdout)
-            
-            # Проверяем структуру JSON
-            if "spectrum" not in result_json or "Т" not in result_json["spectrum"] or "value" not in result_json["spectrum"]["Т"]:
+
+            # Проверяем новую структуру JSON
+            if "input.dat" not in result_json or "Цет. число" not in result_json["input.dat"] or "value" not in \
+                    result_json["input.dat"]["Цет. число"]:
                 logging.error(f"Неверная структура JSON от exequant.exe: {result.stdout}")
                 return None
-            
-            # Извлекаем значение параметра T
-            t_value = result_json["spectrum"]["Т"]["value"]
-            
-            logging.info(f"Exequant успешно выполнен, значение T: {t_value}")
-            return t_value
+
+            # Извлекаем значение параметра "Цет. число"
+            value = result_json["input.dat"]["Цет. число"]["value"]
+
+            return value
         except json.JSONDecodeError as e:
             logging.error(f"Ошибка при разборе JSON от exequant.exe: {e}")
             logging.error(f"Полученный вывод: {result.stdout}")
             return None
-    except subprocess.TimeoutExpired:
-        logging.error("Превышено время ожидания выполнения exequant.exe (10 секунд)")
-        return None
     except Exception as e:
         logging.error(f"Ошибка при запуске exequant.exe: {e}")
-        return None 
+        return None
+
+
+def loadParam():
+    if my_dll is None:
+        error_msg = "DLL не загружена, невозможно выполнить функцию LoadParam"
+        send_error_to_gui(error_msg)
+        return False
+        
+    try:
+        load_param_function = my_dll.LoadParam
+        load_param_function.argtypes = []
+        load_param_function.restype = None
+
+        logging.info("Вызов LoadParam для загрузки параметров из ini-файлов")
+        load_param_function()
+        logging.info("Параметры успешно загружены из ini-файлов")
+        return True
+    except Exception as e:
+        send_error_to_gui(f"Ошибка при вызове LoadParam: {str(e)}")
+        return False
+
+
+def getValueSpecFormula():
+    binary_data = b""
+    with open("./Spectra/empty_fon.spe", 'rb') as file:
+        data = file.readlines()
+        for line in data[37:-1]:
+            binary_data += line
+        x_first = float(data[33].decode("utf-8")[data[33].decode("utf-8").find("=") + 1:])
+        x_last = float(data[34].decode("utf-8")[data[34].decode("utf-8").find("=") + 1:])
+    with open("./Spectra/values_bin.txt", "wb") as newFile:
+        newFile.write(binary_data)
+    arr = np.fromfile("./Spectra/values_bin.txt", dtype=np.single)
+    x_values = []
+
+    latest_original_file = "./Spectra/fon.spe"
+    binary_data = b""
+    with open(latest_original_file, 'rb') as file:
+        data = file.readlines()
+        for line in data[37:-1]:
+            binary_data += line
+    with open("./Spectra/values_bin.txt", "wb") as newFile:
+        newFile.write(binary_data)
+
+    second_arr = np.fromfile("./Spectra/values_bin.txt", dtype=np.single)
+
+    # Создаем массив x_values
+    for i in range(len(arr)):
+        x_values.append(x_first + (i * ((x_last - x_first) / len(arr))))
+
+    # Расчет третьего списка по формуле D=-(log(Isam/Iref)*L)/(L+dL)
+    # Константы
+    L = fetch_data.cuv_length
+    
+    # Загружаем поправку на толщину кюветы из конфига
+    try:
+        with open('config/config.json', 'r', encoding="utf-8") as file:
+            json_data = json.load(file)
+        dL = json_data.get("cuv_correction", 0)
+    except Exception as e:
+        logging.error(f"Ошибка при загрузке поправки на толщину кюветы: {e}")
+        dL = 0
+
+    # Создаем выходной массив
+    output_arr = []
+
+    # Применяем формулу для каждого элемента
+    for i in range(len(arr)):
+        if i < len(second_arr) and arr[i] != 0:  # Проверка деления на ноль
+            # Формула: D=-(log(Isam/Iref)*L)/(L+dL)
+            D = -(np.log10(abs(second_arr[i] / arr[i])) * L) / (L + dL)
+            output_arr.append(D)
+        else:
+            output_arr.append(0)  # Если данные некорректны, добавляем 0
+
+    logging.info(f"Рассчитан массив поглощения из {len(output_arr)} элементов")
+
+    return x_values, output_arr

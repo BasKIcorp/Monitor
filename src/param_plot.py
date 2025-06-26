@@ -92,6 +92,9 @@ class ParameterPlot(pg.PlotItem):
             self.first = min_24h_timestamp()
             self.last = max_24h_timestamp()
             self.spacing = 21600 * TS_MULT_us
+        
+        # Устанавливаем ограничение по оси Y от 0 до 100
+        self.setYRange(0, 100, padding=0)
 
     def update(self, conc, period):
         self.clear()
@@ -113,7 +116,7 @@ class ParameterPlot(pg.PlotItem):
             self.changed = False
             self.x = self.x[:-1]
             self.y = self.y[:-1]
-        param_data = pg.PlotDataItem(list(self.x), list(self.y), pen=None, symbol='o', symbolSize=6)
+        param_data = pg.PlotDataItem(list(self.x), list(self.y), pen=None, symbol='o', symbolSize=4)
         if not self.changed:
             date_axis = TimeAxisItem(orientation='bottom')
             self.setAxisItems(axisItems={'bottom': date_axis})
@@ -122,3 +125,8 @@ class ParameterPlot(pg.PlotItem):
             date_axis.setStyle(autoExpandTextSpace=True)
             date_axis.setTickSpacing(levels=[(self.spacing, 0)])
         self.addItem(param_data)
+        
+        # Принудительное обновление графика
+        if self.scene() and self.scene().views():
+            for view in self.scene().views():
+                view.update()

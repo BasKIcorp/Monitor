@@ -11,13 +11,8 @@ class SettingsWindow(QDialog):
 
     def choose_method(self):
         dlg = QFileDialog()
-        utility_functions.method_path, _ = dlg.getOpenFileName(self, 'Открыть файл', 'resources/data/', "Файл метода (*.mtg *.mtz *.mtd)")
+        utility_functions.method_path, _ = dlg.getOpenFileName(self, 'Открыть файл', './', "Файл метода (*.mtg *.mtz *.mtd)")
         self.path1_label.setText(utility_functions.method_path)
-
-    def choose_fspec(self):
-        dlg = QFileDialog()
-        utility_functions.fspec_path, _ = dlg.getOpenFileName(self, 'Открыть файл', './', "Файл программы FSpec (*.exe)")
-        self.path2_label.setText(utility_functions.fspec_path)
 
     def choose_exequant(self):
         dlg = QFileDialog()
@@ -59,11 +54,27 @@ class SettingsWindow(QDialog):
             utility_functions.days_threshold = int(self.save_entry.text())
         else:
             utility_functions.days_threshold = 5
+            
+        # Получаем значение поправки на толщину кюветы
+        cuv_correction = 0
+        if self.cuv_correction_entry.text():
+            try:
+                cuv_correction = float(self.cuv_correction_entry.text())
+            except ValueError:
+                pass
+                
+        # Получаем значение смещения для параметра
+        param_offset = 0
+        if self.param_offset_entry.text():
+            try:
+                param_offset = float(self.param_offset_entry.text())
+            except ValueError:
+                pass
+                
         with open('config/config.json', 'r', encoding="utf-8") as file:
             json_data = json.load(file)
         json_data["simulation"] = str(utility_functions.simulation)
         json_data["method_path"] = utility_functions.method_path
-        json_data["fspec_path"] = utility_functions.fspec_path
         json_data["exequant_path"] = utility_functions.exequant_path
         json_data["params_period"] = self.combo2.currentText()
         json_data["plots_period"] = self.combo1.currentText()
@@ -71,22 +82,27 @@ class SettingsWindow(QDialog):
         json_data["limits"]["min"] = min_val
         json_data["limits"]["max"] = max_val
         json_data["theme"] = utility_functions.theme
+        json_data["cuv_correction"] = cuv_correction
+        json_data["param_offset"] = param_offset
         with open('config/config.json', 'w') as f:
             json.dump(json_data, f)
 
     def load(self):
         with open('config/config.json', 'r', encoding="utf-8") as file:
             json_data = json.load(file)
-        if json_data["simulation"] == "1":
-            self.rb_on.setChecked(True)
-            utility_functions.simulation = 1
-        else:
+        try:
+            if int(json_data["simulation"]) == 1:
+                self.rb_on.setChecked(True)
+                utility_functions.simulation = 1
+            else:
+                self.rb_off.setChecked(True)
+                utility_functions.simulation = 0
+        except (ValueError, KeyError):
+            # В случае ошибки используем значение по умолчанию
             self.rb_off.setChecked(True)
             utility_functions.simulation = 0
         self.path1_label.setText(json_data["method_path"])
         utility_functions.method_path = json_data["method_path"]
-        self.path2_label.setText(json_data["fspec_path"])
-        utility_functions.fspec_path = json_data["fspec_path"]
         
         # Загрузка пути к exequant.exe
         if "exequant_path" in json_data:
@@ -109,6 +125,15 @@ class SettingsWindow(QDialog):
         self.parent.plot2.setXRange(int(json_data["limits"]["min"]), int(json_data["limits"]["max"]))
         self.parent.plot1.setXRange(int(json_data["limits"]["min"]), int(json_data["limits"]["max"]))
         utility_functions.theme = json_data["theme"]
+        
+        # Загрузка поправки на толщину кюветы
+        if "cuv_correction" in json_data:
+            self.cuv_correction_entry.setText(str(json_data["cuv_correction"]))
+            
+        # Загрузка смещения для параметра
+        if "param_offset" in json_data:
+            self.param_offset_entry.setText(str(json_data["param_offset"]))
+            
         QtWidgets.QApplication.instance().setStyleSheet(Path(f'resources/themes/{utility_functions.theme}.qss').read_text())
 
     def modbus_settings(self):
@@ -138,7 +163,7 @@ class SettingsWindow(QDialog):
     def __init__(self, parent):
         super().__init__()
         self.parent = parent
-        self.setFixedSize(400, 700)
+        self.setFixedSize(400, 650)
         self.setWindowTitle("Настройки")
         self.setModal(True)
         self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
@@ -174,20 +199,6 @@ class SettingsWindow(QDialog):
         path1_layout.addWidget(button1)
         path1_layout.addWidget(self.path1_label)
         layout.addLayout(path1_layout)
-
-        label3 = QtWidgets.QLabel()
-        label3.setText("Путь к файлу FSpec")
-        layout.addWidget(label3)
-
-        path2_layout = QHBoxLayout()
-        button2 = QtWidgets.QPushButton()
-        button2.setText("Выбрать")
-        button2.clicked.connect(self.choose_fspec)
-        self.path2_label = QtWidgets.QLabel()
-        self.path2_label.setText(utility_functions.fspec_path)
-        path2_layout.addWidget(button2)
-        path2_layout.addWidget(self.path2_label)
-        layout.addLayout(path2_layout)
 
         # Добавляем выбор пути к exequant.exe
         label_exequant = QtWidgets.QLabel()
@@ -242,6 +253,22 @@ class SettingsWindow(QDialog):
         self.save_entry = QtWidgets.QLineEdit()
         self.save_entry.setValidator(QtGui.QIntValidator())
         layout.addWidget(self.save_entry)
+        
+        # Добавляем поле для ввода поправки на толщину кюветы
+        cuv_correction_label = QtWidgets.QLabel()
+        cuv_correction_label.setText("Поправка на толщину кюветы")
+        layout.addWidget(cuv_correction_label)
+        self.cuv_correction_entry = QtWidgets.QLineEdit()
+        self.cuv_correction_entry.setValidator(QtGui.QDoubleValidator())
+        layout.addWidget(self.cuv_correction_entry)
+        
+        # Добавляем поле для ввода смещения параметра
+        param_offset_label = QtWidgets.QLabel()
+        param_offset_label.setText("Смещение для параметра")
+        layout.addWidget(param_offset_label)
+        self.param_offset_entry = QtWidgets.QLineEdit()
+        self.param_offset_entry.setValidator(QtGui.QDoubleValidator())
+        layout.addWidget(self.param_offset_entry)
 
         # Добавляем информацию о последнем обновлении фона
         fon_date_layout = QHBoxLayout()
@@ -322,31 +349,17 @@ class SettingsWindow(QDialog):
         modbus_button.clicked.connect(self.modbus_settings)
         layout.addWidget(modbus_button)
 
-        rename_button = QtWidgets.QPushButton()
-        rename_button.setText("Переименовать параметры")
-        rename_button.clicked.connect(self.rename_params)
-        layout.addWidget(rename_button)
-
         self.load()
 
-        change_theme = QtWidgets.QPushButton()
-        change_theme.setText("Сменить тему")
-        change_theme.clicked.connect(self.change_theme)
-        layout.addWidget(change_theme)
+        # change_theme = QtWidgets.QPushButton()
+        # change_theme.setText("Сменить тему")
+        # change_theme.clicked.connect(self.change_theme)
+        # layout.addWidget(change_theme)
 
         save_button = QtWidgets.QPushButton()
         save_button.setText("Сохранить")
         save_button.clicked.connect(self.save)
         layout.addWidget(save_button)
-
-        # logo_layout = QHBoxLayout()
-        # logo = QtWidgets.QLabel()
-        # pixmap = QtGui.QPixmap('resources/images/logo.jpg')
-        # logo.setPixmap(pixmap)
-        # spacer = QtWidgets.QSpacerItem(158, 0, QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-        # logo_layout.addItem(spacer)
-        # logo_layout.addWidget(logo)
-        # layout.addLayout(logo_layout)
 
         if not utility_functions.stop_threads:
             button1.setEnabled(False)

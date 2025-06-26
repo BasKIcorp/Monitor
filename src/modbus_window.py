@@ -116,7 +116,7 @@ class ModbusWindow(QDialog):
     def __init__(self, parent):
         super().__init__()
         self.parent = parent
-        self.setFixedSize(400, 400)
+        self.setFixedSize(400, 300)
         self.setWindowTitle("Настройки ModBus")
         self.setModal(True)
         self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
@@ -133,7 +133,7 @@ class ModbusWindow(QDialog):
         layout.addWidget(label1)
         self.device_entry = QtWidgets.QLineEdit()
         self.device_entry.setValidator(QtGui.QIntValidator())
-        
+
         # Загружаем параметры из конфига
         modbus_config = load_modbus_config()
         

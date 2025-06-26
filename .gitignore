@@ -7,6 +7,8 @@ GAS.dll
 plot_error.log
 main.spec
 main.exe
-main1.exe
+Scanator.dll
+test.ini
+/Log
 src/gui_old.py
 src/__pycache__

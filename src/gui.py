@@ -8,6 +8,8 @@ from datetime import datetime
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtWidgets import QVBoxLayout, QGridLayout, QHBoxLayout, QDialog, QFileDialog
+from PyQt5.QtCore import QCoreApplication, QTimer
+from PyQt5.QtGui import QDesktopServices
 import json
 import pyqtgraph as pg
 import serial
@@ -66,6 +68,10 @@ class Ui_MainWindow(object):
     def __init__(self):
         self.stop_event = threading.Event()
         self._in_error_out = False
+        # Создаем таймер для принудительного обновления графиков
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.refresh_plots)
+        self.refresh_timer.start(500)  # Обновляем каждые 500 мс
 
     def change_color(self):
         self.parent.setStyleSheet('background-color: red;')
@@ -118,11 +124,20 @@ class Ui_MainWindow(object):
         utility_functions.stop_threads = False
         self.stop_event.clear()  # Сбрасываем событие остановки
         
+        # Проверяем соединение ModBus
+        utility_functions.check_modbus_connection()
+        
         # Проверяем режим симуляции
-        if utility_functions.simulation == "1":
+        if utility_functions.simulation == 1:
             logging.info("Запуск в режиме симуляции")
-            self.thread = threading.Thread(target=self.update_trans_plot, daemon=True)
-            logging.info("Запускаем поток обычного измерения в режиме симуляции")
+            # Если первый запуск, выполняем set_fixed_fon
+            if utility_functions.first_start:
+                logging.info("Первый запуск - измерение фонового спектра")
+                self.set_fixed_fon()
+            
+            # Запускаем поток измерения в режиме симуляции
+            self.thread = threading.Thread(target=self.measurement_thread, daemon=True)
+            logging.info("Запускаем поток измерения в режиме симуляции")
         else:
             # Если не режим симуляции, проверяем соединение ModBus
             if utility_functions.modbus_connected and utility_functions.master is not None:
@@ -151,12 +166,8 @@ class Ui_MainWindow(object):
             try:
                 self.start_button.clicked.disconnect()
             except TypeError:
-                # Игнорируем ошибку, если нет подключенных обработчиков
                 pass
             self.start_button.clicked.connect(self.stop_thread)
-            # Обновляем доступность кнопки взятия спектра пустой кюветы в окне настроек, если оно открыто
-            if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
-                self.settings_window.fon_update_settings.setEnabled(False)
             self.plot1.clear()
             self.plot2.clear()
 
@@ -186,10 +197,121 @@ class Ui_MainWindow(object):
         self.current_channel_label.setText("Не выбран")
         self.plot1.clear()
         self.plot2.clear()
+        
+        # Принудительно обновляем графики
+        self.refresh_plots()
+
+    def measurement_thread(self):
+        """Поток для непрерывного измерения"""
+        self.fspec_error.setText("")
+        logging.info("Запуск потока измерения")
+
+        # В режиме симуляции обновляем информацию о текущем канале
+        if utility_functions.simulation == 1:
+            self.current_channel_label.setText("Симуляция")
+
+        while not utility_functions.stop_threads:
+            # Выполняем измерение, если прошло достаточно времени
+            if self.timer1.hasExpired(utility_functions.plots_interval * 1000):
+                # Выполняем одно измерение
+                if not self.update_trans_plot_single():
+                    break
+                    
+            # Проверяем сигнал остановки
+            if self.stop_event.wait(timeout=1):
+                logging.info("Получен сигнал остановки")
+                break
+
+    def set_fixed_fon(self):
+        """Метод для измерения и сохранения фонового спектра"""
+        logging.info("Начало установки фиксированного фона")
+        self.start_button.setEnabled(False)
+        if utility_functions.first_start:
+            try:
+                # Выполняем start_func и init_func для измерения фонового спектра
+                res, warn = utility_functions.start_func()
+                logging.info(f"Результат start_func: res={res}, warn={warn}")
+
+                if res == 0:
+                    res, warn = utility_functions.init_func()
+                    logging.info(f"Результат init_func: res={res}, warn={warn}")
+
+                    if res == 0:
+                        if os.path.exists("./Spectra/fon.spe"):
+                            if os.path.exists("./Spectra/empty_fon.spe"):
+                                os.remove("./Spectra/empty_fon.spe")
+                                logging.info("Удален старый файл empty_fon.spe")
+
+                            os.rename("./Spectra/fon.spe", "./Spectra/empty_fon.spe")
+                            logging.info("Текущий фоновый спектр сохранен как previous_fon.spe")
+
+                        # Обновляем дату в конфигурации
+                        date = datetime.today().strftime('%d.%m.%y %H:%M:%S')
+                        # Обновляем дату в окне настроек, если оно открыто
+                        if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
+                            self.settings_window.last_updated.setText("Дата обновления фона:\n" + date)
+
+                        with open('config/config.json', 'r', encoding="utf-8") as file:
+                            json_data = json.load(file)
+                        json_data["fon_updated"] = date
+                        with open('config/config.json', 'w', encoding="utf-8") as f:
+                            json.dump(json_data, f, ensure_ascii=False, indent=4)
+                        logging.info("Дата обновления фона сохранена в конфигурации")
+                    else:
+                        logging.error(f"Ошибка инициализации при измерении фона: {res}")
+                        self.error_out(res)
+                        self.fspec_error.setText(f"Ошибка при измерении фона (init_func): {res}")
+                else:
+                    logging.error(f"Ошибка запуска при измерении фона: {res}")
+                    self.error_out(res)
+                    self.fspec_error.setText(f"Ошибка при измерении фона (start_func): {res}")
+
+            except Exception as e:
+                logging.error(f"Ошибка при установке фиксированного фона: {e}")
+                self.fspec_error.setText(f"Ошибка при установке фиксированного фона: {e}")
+            finally:
+                self.start_button.setEnabled(True)
+                logging.info("Установка фиксированного фона завершена")
+        else:
+            try:
+                res, warn = utility_functions.init_func()
+                logging.info(f"Результат init_func: res={res}, warn={warn}")
+
+                if res == 0:
+                    if os.path.exists("./Spectra/fon.spe"):
+                        if os.path.exists("./Spectra/empty_fon.spe"):
+                            os.remove("./Spectra/empty_fon.spe")
+                            logging.info("Удален старый файл empty_fon.spe")
+
+                        os.rename("./Spectra/fon.spe", "./Spectra/empty_fon.spe")
+                        logging.info("Текущий фоновый спектр сохранен как previous_fon.spe")
+
+                    # Обновляем дату в конфигурации
+                    date = datetime.today().strftime('%d.%m.%y %H:%M:%S')
+                    # Обновляем дату в окне настроек, если оно открыто
+                    if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
+                        self.settings_window.last_updated.setText("Дата обновления фона:\n" + date)
+
+                    with open('config/config.json', 'r', encoding="utf-8") as file:
+                        json_data = json.load(file)
+                    json_data["fon_updated"] = date
+                    with open('config/config.json', 'w', encoding="utf-8") as f:
+                        json.dump(json_data, f, ensure_ascii=False, indent=4)
+                    logging.info("Дата обновления фона сохранена в конфигурации")
+                else:
+                    logging.error(f"Ошибка инициализации при измерении фона: {res}")
+                    self.error_out(res)
+                    self.fspec_error.setText(f"Ошибка при измерении фона (init_func): {res}")
+
+            except Exception as e:
+                logging.error(f"Ошибка при установке фиксированного фона: {e}")
+                self.fspec_error.setText(f"Ошибка при установке фиксированного фона: {e}")
+            finally:
+                self.start_button.setEnabled(True)
+                logging.info("Установка фиксированного фона завершена")
 
     def channel_measurement_thread(self):
         """Поток для измерения по каналам с переключением через ModBus"""
-        self.icon_label.hide()
         self.fspec_error.setText("")
         logging.info("\n" + "="*50)
         logging.info("ЗАПУСК ПОТОКА ИЗМЕРЕНИЯ ПО КАНАЛАМ")
@@ -204,6 +326,7 @@ class Ui_MainWindow(object):
         max_attempts = channel_config["params"]["attempts"]
         background_period = channel_config["params"]["background_period"] * 60  # Переводим в секунды
         measurements_per_channel = channel_config["params"]["measurements"]
+        plots_interval = utility_functions.plots_interval  # Интервал обновления графиков в секундах
         
         logging.info(f"Параметры измерения:")
         logging.info(f"- Время ожидания переключения (tп): {wait_time} сек")
@@ -211,9 +334,12 @@ class Ui_MainWindow(object):
         logging.info(f"- Количество попыток переключения (k): {max_attempts}")
         logging.info(f"- Период измерения фона (tф): {background_period/60} мин")
         logging.info(f"- Количество измерений на канал (n): {measurements_per_channel}")
+        logging.info(f"- Интервал обновления графиков: {plots_interval} сек")
         
         # Время начала для отслеживания периода фонового спектра
         start_time = time.time()
+        # Время последнего обновления графиков
+        last_update_time = time.time()
         
         # Счетчик неудачных попыток переключения
         failed_attempts = 0
@@ -269,22 +395,29 @@ class Ui_MainWindow(object):
             return
             
         # Переключаемся на канал 0 (пустая ячейка) в начале для измерения фона
-        logging.info("\n=== ПЕРЕКЛЮЧЕНИЕ НА КАНАЛ 0 (ПУСТАЯ ЯЧЕЙКА) ДЛЯ ИЗМЕРЕНИЯ ФОНА ===")
-        if not switcher.switch_to_channel(0, wait_time):
-            logging.error("Не удалось переключиться на канал 0")
-            self.error_out(-101)  # Используем код ошибки -101 для таймаута переключения
-            return
-            
-        # Измеряем фоновый спектр перед началом цикла по каналам
-        logging.info("Измерение начального фонового спектра")
-        self.set_fixed_fon()
+        if utility_functions.first_start:
+            logging.info("\n=== ПЕРЕКЛЮЧЕНИЕ НА КАНАЛ 0 (ПУСТАЯ ЯЧЕЙКА) ДЛЯ НАЧАЛЬНОГО ИЗМЕРЕНИЯ ФОНА ===")
+            if not switcher.switch_to_channel(0, wait_time):
+                logging.error("Не удалось переключиться на канал 0")
+                self.error_out(-101)  # Используем код ошибки -101 для таймаута переключения
+                return
+                
+            # Измеряем фоновый спектр перед началом цикла по каналам
+            logging.info("Измерение начального фонового спектра")
+            self.set_fixed_fon()
+        else:
+            logging.info("Пропускаем начальное измерение фона (не первый запуск)")
         
         # Основной цикл измерения
         logging.info("\n=== НАЧАЛО ЦИКЛА ИЗМЕРЕНИЙ ПО КАНАЛАМ ===")
         while not utility_functions.stop_threads:
+            # Обрабатываем события Qt для обновления интерфейса
+            QCoreApplication.processEvents()
+            
             try:
-                # Проверяем, не пора ли измерить фоновый спектр
                 current_time = time.time()
+                
+                # Проверяем, не пора ли измерить фоновый спектр
                 if current_time - start_time >= background_period:
                     logging.info(f"\n=== ПЕРИОДИЧЕСКОЕ ИЗМЕРЕНИЕ ФОНА (ПРОШЛО {background_period/60:.1f} МИН) ===")
                     
@@ -299,13 +432,24 @@ class Ui_MainWindow(object):
                                 self.error_out(-102)  # Используем код ошибки -102 для превышения попыток
                                 break
                         continue
+                    else:
+                        logging.info("Измерение фонового спектра")
+                        self.set_fixed_fon()
+                        
+                        # Сбрасываем счетчик времени для фонового спектра
+                        start_time = time.time()
+                
+                # Проверяем, не пора ли обновить графики
+                if current_time - last_update_time >= plots_interval:
+                    logging.info(f"\n=== ОБНОВЛЕНИЕ ГРАФИКОВ (ПРОШЛО {plots_interval} СЕК) ===")
                     
-                    # Выполняем измерение фона
-                    logging.info("Измерение фонового спектра")
-                    self.set_fixed_fon()
+                    # Выполняем измерение для обновления графиков
+                    if not self.update_trans_plot_single():
+                        logging.error("Ошибка при обновлении графиков")
+                        break
                     
-                    # Сбрасываем счетчик времени
-                    start_time = time.time()
+                    # Сбрасываем счетчик времени для обновления графиков
+                    last_update_time = time.time()
                 
                 # Проходим по всем каналам
                 for channel_num in range(1, 13):  # Каналы от 1 до 12
@@ -343,16 +487,28 @@ class Ui_MainWindow(object):
                     
                     # Выполняем измерения для текущего канала
                     logging.info(f"Начало измерений для канала {channel_num} ({channel_name})")
-                    for measurement in range(measurements_per_channel):
+                    measurement = 0
+                    while measurement < measurements_per_channel:
                         if utility_functions.stop_threads:
                             break
                             
-                        logging.info(f"Измерение {measurement+1}/{measurements_per_channel} для канала {channel_num} ({channel_name})")
-                        # Выполняем измерение
-                        self.update_trans_plot_single()
-                        
-                        # Пауза между измерениями
-                        time.sleep(1)
+                        # Проверяем, не пора ли обновить графики
+                        current_time = time.time()
+                        if current_time - last_update_time >= plots_interval:
+                            logging.info(f"Измерение {measurement+1}/{measurements_per_channel} для канала {channel_num} ({channel_name})")
+                            
+                            if not self.update_trans_plot_single():
+                                logging.error("Ошибка при обновлении графиков")
+                                break
+                            
+                            # Сбрасываем счетчик времени для обновления графиков
+                            last_update_time = time.time()
+                            
+                            # Переходим к следующему измерению только после обновления графика
+                            measurement += 1
+                        else:
+                            # Если еще не пора обновлять графики, ждем небольшое время
+                            time.sleep(0.1)
                     
                     # Сбрасываем счетчик неудачных попыток после успешного измерения канала
                     failed_attempts = 0
@@ -366,14 +522,19 @@ class Ui_MainWindow(object):
                     break
                     
             except Exception as e:
-                logging.error(f"Ошибка в потоке измерения каналов: {e}")
+                logging.error(f"Ошибка в потоке измерения каналов: {e}", exc_info=True)
                 self.error_out(-103)  # Используем код ошибки -103 для общей ошибки
                 break
         
         logging.info("\n=== ЗАВЕРШЕНИЕ ПОТОКА ИЗМЕРЕНИЯ ПО КАНАЛАМ ===")
 
     def update_trans_plot_single(self):
-        """Выполняет одно измерение (вынесено из update_trans_plot)"""
+        """Выполняет одно измерение"""
+        logging.info("=== НАЧАЛО update_trans_plot_single() ===")
+        
+        # Обрабатываем события Qt для обновления интерфейса
+        QCoreApplication.processEvents()
+        
         # Обновляем значения в окне настроек, если оно открыто
         if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
             self.settings_window.res_value.setText(str(fetch_data.res))
@@ -386,114 +547,122 @@ class Ui_MainWindow(object):
             channel_name = utility_functions.get_channel_name(current_channel)
             # Обновляем label с информацией о текущем канале
             self.current_channel_label.setText(f"{channel_name}")
+            logging.info(f"Текущий канал: {current_channel} ({channel_name})")
         else:
             self.current_channel_label.setText("Не выбран")
+            logging.info("Текущий канал не определен")
 
-        if utility_functions.first_start:
-            logging.info("Первый запуск - инициализация")
-            self.plot1.enableAutoRange(axis=pg.ViewBox.YAxis)
-            self.plot2.enableAutoRange(axis=pg.ViewBox.YAxis)
-            res, warn = utility_functions.start_func()
-            logging.info(f"Результат start_func: res={res}, warn={warn}")
+        try:
+            if utility_functions.first_start:
+                logging.info("Первый запуск - настройка графиков")
+                self.plot1.enableAutoRange(axis=pg.ViewBox.YAxis)
+                self.plot2.enableAutoRange(axis=pg.ViewBox.YAxis)
+                utility_functions.zoom = False
+                utility_functions.first_start = False
+                self.timer1.start()
+                logging.info("Первый запуск завершен успешно")
 
-            if res == 0:
-                res, warn = utility_functions.init_func()
-                logging.info(f"Результат init_func: res={res}, warn={warn}")
+            # Загружаем параметры из ini-файлов
+            logging.info("Загрузка параметров...")
+            utility_functions.loadParam()
+            logging.info("Параметры успешно загружены")
 
-                if res == 0:
-                    try:
-                        x, y, y2 = utility_functions.read_fon_spe()
-                        logging.info("Фоновый спектр успешно прочитан")
-                        self.plot1.update(x, y, y2)
-                        conc = [0]
-                        try:
-                            # Проверяем, указан ли путь к exequant.exe
-                            if not utility_functions.exequant_path:
-                                logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
-                            else:
-                                # Конвертируем спектр в строку для exequant
-                                spectrum_string = utility_functions.spe_to_spectrum_string()
-
-                                # Запускаем exequant и получаем значение T
-                                t_value = utility_functions.run_exequant(spectrum_string)
-
-                                if t_value is not None:
-                                    conc = [t_value]
-                                    logging.info(f"Получено значение 1 из exequant: {t_value}")
-                        except Exception as e:
-                            logging.error(f"Ошибка при получении значения 1 из exequant: {e}")
-                            # Продолжаем измерение без обновления параметра T
-
-                        self.generate_warnings(warn)
-                        x, y = utility_functions.get_spectr_func()
-                        self.save_to_archive(conc, y)
-                        self.plot2.update(x, y)
-
-                        # Обновляем график параметра с новыми значениями
-                        self.param_plots(conc, False)
-                        logging.info("Графики успешно обновлены")
-                    except Exception as e:
-                        logging.error(f"Ошибка при обработке данных: {e}")
-                        return False
-                else:
-                    logging.error(f"Ошибка инициализации: {res}")
-                    self.error_out(res)
-                    return False
-            else:
-                logging.error(f"Ошибка запуска: {res}")
-                self.error_out(res)
-                return False
-
-            utility_functions.zoom = False
-            utility_functions.first_start = False
-            self.timer1.start()
-            logging.info("Первый запуск завершен успешно")
-        else:
-            logging.info("Обновление графиков")
+            # Чтение фонового спектра и обновление графика 1
             res, warn = utility_functions.init_func()
-            if res == 0:
-                x, y, y2 = utility_functions.read_fon_spe()
-                self.plot1.update(x, y, y2)
-                conc = [0]
+            logging.info(f"Результат init_func: res={res}, warn={warn}")
+
+            if res != 0:
+                self.error_out(res)
+
+            logging.info("Чтение фонового спектра...")
+            x, y, y2 = utility_functions.read_fon_spe()
+            logging.info("Фоновый спектр прочитан")
+            self.plot1.update(x, y, y2)
+            logging.info("График 1 обновлен")
+
+            logging.info("Получение спектра поглощения по формуле")
+            x_values, y_values = utility_functions.getValueSpecFormula()
+
+            # # Получаем спектр поглощения
+            # logging.info("Получение спектра поглощения...")
+            # res, x_values, y_values, warn_value = utility_functions.getValueSpec()
+            # # logging.info(f"Получен спектр: res={res}, точек={len(x_values)}, предупреждение={warn_value}")
+            #
+            # logging.info("Получение спектра поглощения из файла")
+            # file_y = utility_functions.getValueSpecFile()
+
+            if os.path.exists("./Spectra/fon.spe"):
+                os.remove("./Spectra/fon.spe")
+                if os.path.exists("./Spectra/empty_fon.spe"):
+                    os.rename("./Spectra/empty_fon.spe", "./Spectra/fon.spe")
+
+            if os.path.exists("./Spectra/fon.spe"):
+                os.rename("./Spectra/fon.spe", "./Spectra/empty_fon.spe")
+            
+            # Формируем массив концентраций (пока пустой)
+            conc = []
+            
+            if len(x_values) > 0 and len(y_values) > 0:
+                # Получаем значение температуры из exequant.exe
                 try:
                     # Проверяем, указан ли путь к exequant.exe
                     if not utility_functions.exequant_path:
-                        logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
+                        logging.warning("Путь к exequant.exe не указан, пропускаем получение цетанового числа")
                     else:
+                        logging.info("Получение цетанового числа из exequant...")
                         # Конвертируем спектр в строку для exequant
-                        spectrum_string = utility_functions.spe_to_spectrum_string()
+                        convert_res = utility_functions.spectrum_to_dat(x_values, y_values)
 
-                        # Запускаем exequant и получаем значение T
-                        t_value = utility_functions.run_exequant(spectrum_string)
+                        if convert_res == 0:
+                            # Запускаем exequant и получаем значение T
+                            t_value = utility_functions.run_exequant()
 
-                        if t_value is not None:
-                            # Добавляем значение T в первый параметр
-                            if len(conc) > 0:
-                                conc[0] = t_value
-                            else:
-                                conc = [t_value]
-                            logging.info(f"Получено значение T из exequant: {t_value}")
+                            if t_value is not None:
+                                # Получаем смещение для параметра из конфига
+                                param_offset = 0
+                                try:
+                                    with open('config/config.json', 'r', encoding="utf-8") as file:
+                                        json_data = json.load(file)
+                                    param_offset = json_data.get("param_offset", 0)
+                                except Exception as e:
+                                    logging.error(f"Ошибка при чтении смещения параметра из конфига: {e}")
+
+                                # Применяем смещение к значению параметра
+                                adjusted_t_value = t_value + param_offset
+                                if 0 < adjusted_t_value < 100:
+                                    # Добавляем скорректированное значение T в первый параметр
+                                    conc = [adjusted_t_value]
+                                    logging.info(f"Получено цетановое число из exequant: {t_value}, с учетом смещения: {adjusted_t_value}")
+                                else:
+                                    logging.info(f"Цетановое число из exequant с учетом смещения меньше нуля или больше 100: {adjusted_t_value}")
                 except Exception as e:
-                    logging.error(f"Ошибка при получении значения T из exequant: {e}")
+                    logging.error(f"Ошибка при получении цетанового числа из exequant: {e}")
                     # Продолжаем измерение без обновления параметра T
-
-                self.generate_warnings(warn)
-                x, y = utility_functions.get_spectr_func()
-                self.save_to_archive(conc, y)
-                self.plot2.update(x, y)
+                
+                logging.info("Спектр получен, сохранение в архив...")
+                self.save_to_archive(conc, y_values)
+                logging.info("Обновление графика 2...")
+                self.plot2.update(x_values, y_values)
+                logging.info("График 2 обновлен")
 
                 # Обновляем график параметра с новыми значениями
+                logging.info("Обновление графиков параметров...")
                 self.param_plots(conc, False)
+                logging.info("Графики параметров обновлены")
+                
+                # Перезапускаем таймер
+                self.timer1.restart()
             else:
-                self.error_out(res)
+                self.error_out(-103)
                 return False
-            self.timer1.restart()
-        
+                
+        except Exception as e:
+            logging.error(f"Неожиданная ошибка в update_trans_plot_single: {str(e)}", exc_info=True)
+            self.error_out(-103)  # Используем код ошибки -103 для общей ошибки
+            return False
+            
+        logging.info("=== ЗАВЕРШЕНИЕ update_trans_plot_single() ===")
         return True
-
-    def run_fix_fon_thread(self):
-        self.thread = threading.Thread(target=self.set_fixed_fon, daemon=True)
-        self.thread.start()
 
     def generate_warnings(self, warning):
         self.warnings_box.clear()
@@ -504,6 +673,10 @@ class Ui_MainWindow(object):
         for i in range(len(warnings)):
             if warnings[i] == '1':
                 self.warnings_box.addItem(str(json_data["warnings"].get(str(i))))
+
+    def run_fix_fon_thread(self):
+        self.thread = threading.Thread(target=self.set_fixed_fon, daemon=True)
+        self.thread.start()
 
     def error_out(self, res):
         # Защита от рекурсивного вызова
@@ -517,217 +690,45 @@ class Ui_MainWindow(object):
                 json_data = json.load(file)
             if res > 0:
                 res = -500
-            self.fspec_error.setText("Ошибка! " + str(json_data["errors"].get(str(res))))
-            self.icon_label.show()
             
             # Проверяем, вызывается ли метод из потока измерения
             if threading.current_thread() == threading.main_thread():
-                # Если вызывается из основного потока, останавливаем поток измерения
+                # Если вызывается из основного потока, обновляем UI напрямую
+                self.fspec_error.setText("Ошибка! " + str(json_data["errors"].get(str(res))))
+                # Останавливаем поток измерения
                 self.stop_thread()
             else:
-                # Если вызывается из потока измерения, просто устанавливаем флаг остановки
+                # Если вызывается из потока измерения, обновляем UI через QTimer
+                error_text = "Ошибка! " + str(json_data["errors"].get(str(res)))
+                
+                # Устанавливаем флаги остановки
                 utility_functions.stop_threads = True
-                self.stop_event.set()
-                # Обновляем UI через сигналы, чтобы избежать ошибок с доступом к UI из другого потока
-                QtCore.QMetaObject.invokeMethod(self.start_button, "setText", 
-                                              QtCore.Qt.QueuedConnection,
-                                              QtCore.Q_ARG(str, "Начать\nизмерение"))
-                # Используем QTimer для безопасного подключения сигнала в основном потоке
+                # self.stop_event.set()
+                
+                # Безопасно обновляем UI через QTimer
+                QtCore.QTimer.singleShot(0, lambda text=error_text: self.fspec_error.setText(text))
+                QtCore.QTimer.singleShot(0, lambda: self.start_button.setText("Начать\nизмерение"))
+                QtCore.QTimer.singleShot(0, lambda: self._safe_disconnect_button())
                 QtCore.QTimer.singleShot(0, lambda: self.start_button.clicked.connect(self.run_thread))
-                # Безопасно очищаем графики
                 QtCore.QTimer.singleShot(0, lambda: self.plot1.clear())
                 QtCore.QTimer.singleShot(0, lambda: self.plot2.clear())
-                # Сбрасываем информацию о текущем канале
                 QtCore.QTimer.singleShot(0, lambda: self.current_channel_label.setText("Не выбран"))
+                
                 # Обновляем доступность кнопки взятия спектра пустой кюветы в окне настроек, если оно открыто
                 if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
                     QtCore.QTimer.singleShot(0, lambda: self.settings_window.fon_update_settings.setEnabled(True))
+        except Exception as e:
+            logging.error(f"Ошибка в error_out: {e}")
+            self.fspec_error.setText(f"Ошибка в error_out: {e}")
         finally:
             self._in_error_out = False
-
-    def update_trans_plot(self):
-        self.icon_label.hide()
-        self.fspec_error.setText("")
-        logging.info("Запуск обновления графиков")
-
-        while not utility_functions.stop_threads:
-            # Обновляем значения в окне настроек, если оно открыто
-            if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
-                self.settings_window.res_value.setText(str(fetch_data.res))
-                self.settings_window.scans_value.setText(str(fetch_data.scans))
-                self.settings_window.cuv_value.setText(str(fetch_data.cuv_length))
-
-            if utility_functions.first_start or self.timer1.hasExpired(utility_functions.plots_interval * 1000):
-                if utility_functions.first_start:
-                    logging.info("Первый запуск - инициализация")
-                    self.plot1.enableAutoRange(axis=pg.ViewBox.YAxis)
-                    self.plot2.enableAutoRange(axis=pg.ViewBox.YAxis)
-                    res, warn = utility_functions.start_func()
-                    logging.info(f"Результат start_func: res={res}, warn={warn}")
-
-                    if res == 0:
-                        res, warn = utility_functions.init_func()
-                        logging.info(f"Результат init_func: res={res}, warn={warn}")
-
-                        if res == 0:
-                            try:
-                                x, y, y2 = utility_functions.read_fon_spe()
-                                logging.info("Фоновый спектр успешно прочитан")
-                                self.plot1.update(x, y, y2)
-                                conc[0] = 0
-                                try:
-                                    # Проверяем, указан ли путь к exequant.exe
-                                    if not utility_functions.exequant_path:
-                                        logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
-                                    else:
-                                        # Конвертируем спектр в строку для exequant
-                                        spectrum_string = utility_functions.spe_to_spectrum_string()
-
-                                        # Запускаем exequant и получаем значение T
-                                        t_value = utility_functions.run_exequant(spectrum_string)
-
-                                        if t_value is not None:
-                                            # Добавляем значение T в первый параметр
-                                            if len(conc) > 0:
-                                                conc[0] = t_value
-                                            else:
-                                                conc = [t_value]
-                                            logging.info(f"Получено значение T из exequant: {t_value}")
-                                except Exception as e:
-                                    logging.error(f"Ошибка при получении значения T из exequant: {e}")
-                                    # Продолжаем измерение без обновления параметра T
-
-                                self.generate_warnings(warn)
-                                x, y = utility_functions.get_spectr_func()
-                                self.save_to_archive(conc, y)
-                                self.plot2.update(x, y)
-
-                                # Обновляем график параметра с новыми значениями
-                                self.param_plots(conc, False)
-                                logging.info("Графики успешно обновлены")
-                            except Exception as e:
-                                logging.error(f"Ошибка при обработке данных: {e}")
-                                break
-                        else:
-                            logging.error(f"Ошибка инициализации: {res}")
-                            self.error_out(res)
-                            break
-                    else:
-                        logging.error(f"Ошибка запуска: {res}")
-                        self.error_out(res)
-                        break
-
-                    utility_functions.zoom = False
-                    utility_functions.first_start = False
-                    self.timer1.start()
-                    logging.info("Первый запуск завершен успешно")
-                else:
-                    logging.info("Обновление графиков")
-                    res, warn = utility_functions.init_func()
-                    if res == 0:
-                        x, y, y2 = utility_functions.read_fon_spe()
-                        self.plot1.update(x, y, y2)
-                        conc = [0]
-                        try:
-                            # Проверяем, указан ли путь к exequant.exe
-                            if not utility_functions.exequant_path:
-                                logging.warning("Путь к exequant.exe не указан, пропускаем получение параметра T")
-                            else:
-                                # Конвертируем спектр в строку для exequant
-                                spectrum_string = utility_functions.spe_to_spectrum_string()
-
-                                # Запускаем exequant и получаем значение T
-                                t_value = utility_functions.run_exequant(spectrum_string)
-
-                                if t_value is not None:
-                                    # Добавляем значение T в первый параметр
-                                    if len(conc) > 0:
-                                        conc[0] = t_value
-                                    else:
-                                        conc = [t_value]
-                                    logging.info(f"Получено значение T из exequant: {t_value}")
-                        except Exception as e:
-                            logging.error(f"Ошибка при получении значения T из exequant: {e}")
-                            # Продолжаем измерение без обновления параметра T
-
-                        self.generate_warnings(warn)
-                        x, y = utility_functions.get_spectr_func()
-                        self.save_to_archive(conc, y)
-                        self.plot2.update(x, y)
-
-                        # Обновляем график параметра с новыми значениями
-                        self.param_plots(conc, False)
-                    else:
-                        self.error_out(res)
-                        break
-                    self.timer1.restart()
-                if self.stop_event.wait(timeout=1):
-                    logging.info("Получен сигнал остановки")
-                    break
-
-    def set_fixed_fon(self):
-        logging.info("Начало установки фиксированного фона")
-        self.start_button.setEnabled(False)
-
+    
+    def _safe_disconnect_button(self):
         try:
-            if utility_functions.first_start:
-                res, warn = utility_functions.start_func()
-                logging.info(f"Результат start_func: res={res}, warn={warn}")
-
-                if res == 0:
-                    res, warn = utility_functions.init_func()
-                    logging.info(f"Результат init_func: res={res}, warn={warn}")
-
-                    if res == 0:
-                        if os.path.exists("Spectra/original.spe"):
-                            os.remove("Spectra/original.spe")
-                            logging.info("Удален старый файл original.spe")
-
-                        os.rename("Spectra/fon.spe", "Spectra/original.spe")
-                        logging.info("Фоновый спектр сохранен как original.spe")
-
-                        utility_functions.first_start = False
-                        date = datetime.today().strftime('%d.%m.%y %H:%M:%S')
-                        # Обновляем дату в окне настроек, если оно открыто
-                        if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
-                            self.settings_window.last_updated.setText("Дата обновления фона:\n" + date)
-
-                        with open('config/config.json', 'r', encoding="utf-8") as file:
-                            json_data = json.load(file)
-                        json_data["fon_updated"] = date
-                        with open('config/config.json', 'w') as f:
-                            json.dump(json_data, f)
-                        logging.info("Дата обновления фона сохранена в конфигурации")
-                    else:
-                        logging.error(f"Ошибка инициализации: {res}")
-                        self.error_out(res)
-                else:
-                    logging.error(f"Ошибка запуска: {res}")
-                    self.error_out(res)
-            else:
-                res, warn = utility_functions.init_func()
-                if res == 0:
-                    date = datetime.today().strftime('%d.%m.%y %H:%M:%S')
-                    # Обновляем дату в окне настроек, если оно открыто
-                    if hasattr(self, 'modal_popup') and self.settings_window.isVisible():
-                        self.settings_window.last_updated.setText("Дата обновления фона:\n" + date)
-
-                    with open('config/config.json', 'r', encoding="utf-8") as file:
-                        json_data = json.load(file)
-                    json_data["fon_updated"] = date
-                    with open('config/config.json', 'w') as f:
-                        json.dump(json_data, f)
-                    if os.path.exists("Spectra/original.spe"):
-                        os.remove("Spectra/original.spe")
-                    os.rename("Spectra/fon.spe", "Spectra/original.spe")
-                else:
-                    self.error_out(res)
-
-        except Exception as e:
-            logging.error(f"Ошибка при установке фиксированного фона: {e}")
-        finally:
-            self.start_button.setEnabled(True)
-            logging.info("Установка фиксированного фона завершена")
+            self.start_button.clicked.disconnect()
+        except TypeError:
+            # Игнорируем ошибку, если нет подключенных обработчиков
+            pass
 
     def update_param_names(self):
         self.params_labels[0].setText(utility_functions.parameter_names[0])
@@ -804,6 +805,9 @@ class Ui_MainWindow(object):
         MainWindow.setObjectName("MainWindow")
         self.parent = MainWindow
         
+        # Подключаемся к сигналу ошибки из utility_functions
+        self.connect_error_signal()
+        
         # Устанавливаем шрифт Arial для главного окна
         font = QtGui.QFont("Arial")
         MainWindow.setFont(font)
@@ -827,8 +831,6 @@ class Ui_MainWindow(object):
         self.start_button.setObjectName("start_button")
         self.start_button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.start_button.clicked.connect(self.run_thread)
-        if not os.path.exists("Spectra/original.spe"):
-            self.start_button.setEnabled(False)
         start_layout.addWidget(self.start_button, 0, 0)
 
         group_box = QtWidgets.QGroupBox("Окно предупреждений")
@@ -841,20 +843,18 @@ class Ui_MainWindow(object):
 
         logo_label = QtWidgets.QLabel()
         pixmap = QtGui.QPixmap("resources/images/logo_big.jpg")
+        pixmap = pixmap.scaledToWidth(100, QtCore.Qt.SmoothTransformation)
         logo_label.setPixmap(pixmap)
-
+        logo_label.setCursor(QtGui.QCursor(QtCore.Qt.PointingHandCursor))
+        logo_label.mousePressEvent = lambda event: QtGui.QDesktopServices.openUrl(QtCore.QUrl("https://baski.pro/automatica"))
+        
         start_layout.addWidget(logo_label, 0, 1)
 
         error_font = QtGui.QFont("Arial", 6)
         error_font.setBold(True)
         self.label_layout = QHBoxLayout()
-        self.icon_label = QtWidgets.QLabel()
-        self.icon_label.setPixmap(
-            QtWidgets.QApplication.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxWarning).pixmap(32))
-        self.icon_label.hide()
         self.label_layout.addStretch()
 
-        self.label_layout.addWidget(self.icon_label)
         self.fspec_error = QtWidgets.QLabel()
         self.fspec_error.setText("")
         self.fspec_error.setFont(error_font)
@@ -978,6 +978,27 @@ class Ui_MainWindow(object):
         MainWindow.setWindowTitle(_translate("MainWindow", "Приложение"))
         self.start_button.setText(_translate("MainWindow", "Начать\nизмерение"))
         self.settings_button.setText(_translate("MainWindow", "Настройки"))
+
+    def connect_error_signal(self):
+        """Подключает сигнал ошибки из utility_functions к обработчику в GUI"""
+        utility_functions.error_emitter.error_signal.connect(self.handle_error_signal)
+        
+    def handle_error_signal(self, error_text):
+        """Обрабатывает сигнал ошибки, отображая текст в fspec_error"""
+        # Используем QTimer для безопасного обновления UI из другого потока
+        QtCore.QTimer.singleShot(0, lambda: self.fspec_error.setText(error_text))
+
+    def refresh_plots(self):
+        """Принудительно обновляет графики"""
+        if hasattr(self, 'transmission') and self.transmission.scene():
+            self.transmission.scene().update()
+        if hasattr(self, 'intensity') and self.intensity.scene():
+            self.intensity.scene().update()
+        # Обновляем все графики параметров
+        if hasattr(self, 'param_values') and utility_functions.parameter:
+            for param_plot in utility_functions.parameter:
+                if param_plot.scene():
+                    param_plot.scene().update()
 
 
 def set_application_font(app):

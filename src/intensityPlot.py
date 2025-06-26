@@ -17,11 +17,16 @@ class IntensityPlot(pg.PlotItem):
         self.clear()
         color1 = (158, 2, 2)
         color2 = (48, 133, 30)
-        self.addLegend(brush="white", labelTextColor="black", pen="black")
+        self.addLegend(brush="white", labelTextColor="black", pen="black", offset=(0, 100))
         self.transmission_data1 = pg.PlotDataItem(x, y, pen=color1, name="Текущий спектр", width=4)
-        self.transmission_data2 = pg.PlotDataItem(x, y2, pen=color2, name="Спектр пустой кюветы", width=4)
+        self.transmission_data2 = pg.PlotDataItem(x, y2, pen=color2, name="Спектр фона", width=4)
         self.addItem(self.transmission_data1)
         self.addItem(self.transmission_data2)
+        
+        # Принудительное обновление графика
+        if self.scene() and self.scene().views():
+            for view in self.scene().views():
+                view.update()
 
 
 

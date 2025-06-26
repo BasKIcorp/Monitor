@@ -5,8 +5,23 @@ from PyQt5.QtWidgets import QApplication, QMainWindow
 from PyQt5 import QtGui
 import platform
 import os
+import sys
+import traceback
 
 from src.gui import Ui_MainWindow, set_application_font  # Import the generated module
+
+# Глобальный обработчик исключений
+def global_exception_handler(exctype, value, tb):
+    """
+    Глобальный обработчик исключений, который логирует ошибки вместо завершения программы
+    """
+    # Получаем строку с трассировкой стека
+    tb_str = ''.join(traceback.format_exception(exctype, value, tb))
+    # Логируем ошибку
+    logging.critical(f"Необработанное исключение: {exctype.__name__}: {value}\n{tb_str}")
+    # Выводим сообщение в консоль
+    print(f"КРИТИЧЕСКАЯ ОШИБКА: {exctype.__name__}: {value}")
+    # Не завершаем программу, а продолжаем выполнение
 
 # Настройка логгирования
 def setup_logging():
@@ -21,16 +36,26 @@ def setup_logging():
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
     
-    # Настраиваем корневой логгер
-    logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
-        datefmt=date_format,
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
-    )
+    # Создаем форматтер
+    formatter = logging.Formatter(log_format, date_format)
+    
+    # Получаем корневой логгер
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Очищаем все обработчики, если они есть
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Добавляем обработчик для файла
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    
+    # Добавляем обработчик для консоли
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
     
     logging.info('Логгирование инициализировано')
 
@@ -65,21 +90,31 @@ if __name__ == "__main__":
     # Инициализируем логгирование
     setup_logging()
     
+    # Устанавливаем глобальный обработчик исключений
+    sys.excepthook = global_exception_handler
+    
     logging.info('Запуск приложения')
     try:
         app = QApplication([])
         set_application_font(app)
+        
         # Применяем стиль из QSS-файла
         try:
             app.setStyleSheet(Path('resources/themes/light.qss').read_text())
             logging.info('Стиль QSS успешно применен')
         except Exception as e:
             logging.error(f'Ошибка при применении стиля QSS: {e}')
+            
         window = MyMainWindow()
         logging.info('Открытие окна в полноэкранном режиме')
         window.showMaximized()
         logging.info('Запуск главного цикла приложения')
-        app.exec_()
+        
+        # Запускаем главный цикл приложения в блоке try-except
+        try:
+            app.exec_()
+        except Exception as e:
+            logging.critical(f'Критическая ошибка в главном цикле приложения: {e}', exc_info=True)
     except Exception as e:
-        logging.critical(f'Критическая ошибка при запуске приложения: {e}')
+        logging.critical(f'Критическая ошибка при запуске приложения: {e}', exc_info=True)
 
